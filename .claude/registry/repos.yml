@@ -1,0 +1,510 @@
+# OgenticAI multi-repo registry — grounded in BOTH Linear and GitHub (2026-05-29).
+#
+# 16 real repos, all under github.com/OgenticAI/, evidenced by ≥1 merged PR
+# in the last 60 days.  Source: linear.list_diffs (253 PRs across two pages).
+#
+# Naming convention seen in practice (not the kebab I guessed earlier):
+#   - agent-<thing>      → internal agents (agent-reviewer, agent-dealsizer, ...)
+#   - agentcovenant      → one outlier (no separator)
+#   - ai-assessment      → one outlier (no "agent-" prefix)
+#   - ogentic-<thing>    → OSS libs (ogentic-shield, ogentic-audit)
+#   - product names      → sotto, sotto-desktop, zashboard-ultimate
+#
+# Canonical OgenticAI stack (evidenced by "canonical stack migration" PRs
+# in ai-assessment, asset-intelligence-hub, ogentic-secure-ai):
+#   Next.js  +  Prisma  +  BetterAuth  +  Postgres
+#   + HMAC audit chain (Ogentic-Audit)
+#   + tenant isolation middleware
+#
+# Linear → GitHub linkage convention (evidenced by 79% of PR titles):
+#   Commit-message prefix: `feat(OGE-398): ...`, `fix(OGE-394): ...`, etc.
+#   NOT Linear's native PR linker (0/253 PRs use `linkedIssues`).
+#
+# Linear team prefixes seen in titles/branches:
+#   OGE (primary), ADR (architecture decisions?), WAVE (OSS waves?), DSM, LAYER
+#   → Confirm what ADR/WAVE/DSM/LAYER refer to.
+
+version: 3
+workspace: ogenticai-linear
+linear_team: OGE
+github_org: OgenticAI
+canonical_stack:
+  frontend: nextjs
+  backend: nextjs-route-handlers
+  orm: prisma
+  auth: betterauth
+  database: postgres
+  audit: ogentic-audit
+linkage:
+  pr_to_linear: commit-message-prefix    # "feat(OGE-NNN): ..."  not native linker
+  branch_convention: feature-style       # not Linear's auto-generated branch
+
+# ──────────────────────────────────────────────────────────────────────────
+# REPOS — sorted by recent PR activity (May 2026 default ordering)
+# ──────────────────────────────────────────────────────────────────────────
+
+repos:
+
+  # ─── most active: the PR reviewer itself ─────────────────────────────────
+  - name: agent-reviewer
+    kind: platform-tool
+    linear_project: OgenticAI Reviewer
+    priority: high
+    status: active                              # NOT "completed" — 24 recent PRs
+    url: git@github.com:OgenticAI/agent-reviewer.git
+    description: |
+      The "lives in GitHub" AI reviewer that audits PRs against linked Linear
+      ticket UAT checklists and blocks merge on fail. Itself under active
+      development — currently hardening sweep (chaos runbook, diagnostic
+      logging on auto-patch step, Checks-vs-Statuses API handling).
+    stacks: [typescript, nodejs]
+    recent_prs: 24
+    sample_titles:
+      - "fix(OGE-395): diagnostic logging on auto-patch step"
+      - "fix(OGE-394): isCiGreen reads both Checks and Statuses APIs"
+      - "docs(OGE-391): chaos runbook from hardening sweep"
+    factory_notes: |
+      This is the agent the factory must INTEGRATE WITH, not duplicate. The
+      factory's validator + security-reviewer run BEFORE PR open; agent-reviewer
+      runs ON PR open. Same UAT-checklist source (the Linear ticket).
+      The "chore: install OgenticAI Reviewer (UAT-checklist gate)" pattern
+      seen across many agent-* repos is the rollout of this reviewer to each
+      repo — keep doing that, the factory doesn't replace it.
+
+  # ─── client engagement that doubles as a product ────────────────────────
+  - name: agent-dealsizer
+    kind: client-engagement-and-product
+    linear_project: Sizer AI (Revere Capital)
+    serves_clients: [Revere Capital]
+    priority: high
+    url: git@github.com:OgenticAI/agent-dealsizer.git
+    description: |
+      Deal Sizer agent. Currently the MOST active repo overall (40 recent PRs).
+      Originally a Revere engagement; appears to be the canonical sizer for
+      future client sizing engagements too.
+    stacks: [nextjs, typescript, prisma, betterauth]
+    recent_prs: 40
+    sample_titles:
+      - "[ui] Client merge reads deal-package arrays (OGE-335)"
+      - "chore: install OgenticAI Reviewer (UAT-checklist gate)"
+    factory_notes: |
+      LINEAR DUPLICATE: there was a planned "revere-sizer" client repo in v2
+      of this registry — this is it. No separate repo exists.
+      QUESTION: is this the canonical Sizer for ALL clients, or do new clients
+      get their own forks?
+
+  # ─── Wave 1 OSS — heavy active development ──────────────────────────────
+  - name: ogentic-audit
+    kind: oss-library
+    wave: 1
+    linear_project: Ogentic-Audit (OSS)
+    priority: high
+    target_date: 2026-06-30
+    url: git@github.com:OgenticAI/ogentic-audit.git
+    description: |
+      HMAC-chained audit log library. Wave 1 OSS. Heavy active development —
+      release CI (release-cli workflow, CHANGELOG, Homebrew formula stub),
+      Sotto Desktop integration guide.
+    stacks: [rust, typescript, python]
+    recent_prs: 21
+    sample_titles:
+      - "ci(OGE-445): D3 — release orchestrator + CHANGELOG.md for v0.1.0"
+      - "ci(OGE-439): C4 — release-cli workflow + Homebrew formula stub"
+      - "docs(OGE-444): D2 — Sotto Desktop integration guide + sample"
+    publish:
+      - npm:    "@ogenticai/audit"
+      - pypi:   "ogentic-audit"
+      - crates: "ogentic-audit"
+      - homebrew: "ogentic-audit-cli"
+    builder_agents:
+      - rust-builder
+      - backend-builder-typescript
+      - backend-builder-python
+      - security-reviewer
+      - library-publisher
+    factory_notes: |
+      Currently shipping CLI + library + Tauri/desktop integration in
+      parallel. The factory's release-manager + library-publisher should
+      coordinate the multi-target publish (npm + PyPI + crates + Homebrew).
+
+  # ─── Sotto Desktop — Tauri app, heavy build ─────────────────────────────
+  - name: sotto-desktop
+    kind: desktop
+    shell: tauri
+    linear_project: Sotto Desktop v1
+    priority: urgent
+    target_date: 2026-07-31
+    url: git@github.com:OgenticAI/sotto-desktop.git
+    description: |
+      Tauri-based desktop app with audit ledger UI, vault unlock, onboarding,
+      Meeting Mode, Converter integration. Wave-2 OSS reflected in architecture.
+    stacks: [rust, typescript, react, tauri]
+    recent_prs: 17
+    sample_titles:
+      - "docs(OGE-481): Meeting Mode + Converter specs; ARCHITECTURE reflects Wave-2 OSS"
+      - "C3 Audit ledger — banner + stats + filters + chain visualization (OGE-411)"
+      - "B1 Onboarding + B2 Setup + B3 Vault unlock (OGE-406, OGE-407, ...)"
+    builder_agents:
+      - rust-builder
+      - backend-builder-typescript
+      - frontend-builder
+      - test-verifier
+      - security-reviewer
+      - compliance-reviewer
+      - native-packager
+    depends_on:
+      - ogentic-shield
+      - ogentic-audit
+    deploy:
+      out_of_band: true
+      target: "auto-update channel + crash-report ingest"
+
+  # ─── Wave 1 OSS — the privacy detector ──────────────────────────────────
+  - name: ogentic-shield
+    kind: oss-library
+    wave: 1
+    linear_project: Ogentic-Shield (OSS)
+    priority: urgent
+    target_date: 2026-05-31
+    url: git@github.com:OgenticAI/ogentic-shield.git
+    description: |
+      Privilege/PHI/MNPI detection library. Wave 1 OSS. Includes plain-text
+      Phase 1 detectors and an MCPB (MCP Bundle) one-click installer for
+      non-technical users.
+    stacks: [rust, typescript, python, mcpb]
+    recent_prs: 16
+    sample_titles:
+      - "feat(OGE-398): Shield.analyze_document API + plain-text Phase 1"
+      - "feat(OGE-396): narrow Layer 3 to a complementary classifier"
+      - "feat(mcpb): one-click MCP Bundle for non-technical install"
+    publish:
+      - npm:    "@ogenticai/shield"
+      - pypi:   "ogentic-shield"
+      - crates: "ogentic-shield"
+      - mcpb:   "shield-bundle"
+    builder_agents:
+      - rust-builder
+      - backend-builder-python
+      - backend-builder-typescript
+      - ai-eval-engineer
+      - security-reviewer
+      - library-publisher
+
+  # ─── Statement AI for Impact Ventures ───────────────────────────────────
+  - name: statement-ai
+    kind: client-engagement
+    client: Impact Ventures
+    linear_project: Statement AI (Impact Ventures)
+    priority: high
+    url: git@github.com:OgenticAI/statement-ai.git
+    description: |
+      Client engagement for Impact Ventures. Shipped tenant isolation
+      middleware (OGE-231), full CI + PRD + CLAUDE.md early.
+    stacks: [nextjs, prisma, betterauth, typescript]
+    recent_prs: 9
+    sample_titles:
+      - "feat(tenancy): tenant isolation middleware (OGE-231)"
+      - "ci: GitHub Actions CI + PRD + CLAUDE.md + docs (OGE-232, OGE-216, OGE-223, ...)"
+    depends_on:
+      - ogentic-audit
+      - ogentic-shield
+
+  # ─── Zashboard — customer command centre ────────────────────────────────
+  - name: zashboard-ultimate
+    kind: web-platform
+    linear_project: Zashboard
+    priority: high
+    url: git@github.com:OgenticAI/zashboard-ultimate.git
+    description: |
+      Customer-facing command centre + admin analytics. Also home of the
+      `@ogenticai/ui` and `@ogenticai/config-tailwind` packages synced to
+      sotto-desktop.
+    stacks: [nextjs, typescript, react, tailwind]
+    recent_prs: 9
+    sample_titles:
+      - "docs(OGE-482): amend ADR 0004 — add Redact, Converter to Wave-2 OSS subset"
+      - "feat(scripts): sync @ogenticai/{ui,config-tailwind} to sotto-desktop (OGE-387)"
+      - "docs(migration): legacy org-ogenticai harvest + archival (OG..."
+    builder_agents:
+      - backend-builder-typescript
+      - frontend-builder
+      - test-verifier
+      - validator
+      - security-reviewer
+      - release-manager
+    depends_on:
+      - ogentic-audit
+    factory_notes: |
+      Also hosts the shared design system (@ogenticai/ui) — when changes here
+      ship, sotto-desktop and other consumers pin to new versions. The
+      Cross-Repo Coordinator should treat zashboard-ultimate → consumers as
+      a cross-repo dependency chain.
+
+  # ─── Deal Flow CRM ──────────────────────────────────────────────────────
+  - name: deal-flow-gmail-attio-crm
+    kind: internal-agent
+    linear_project: Deal Flow (Attio + Gmail)
+    priority: medium
+    url: git@github.com:OgenticAI/deal-flow-gmail-attio-crm.git
+    description: |
+      Gmail ingest → AI extract → Attio CRM sync. Migrated from Lovable to
+      Anthropic SDK. Vercel-deployed.
+    stacks: [nextjs, typescript, anthropic-sdk, vercel]
+    recent_prs: 5
+    sample_titles:
+      - "Migrate AI from Lovable to Anthropic SDK + fix build blockers and deal-approval"
+      - "chore: trigger Vercel production deploy"
+
+  # ─── Asset Intelligence Hub = Revere ARA ───────────────────────────────
+  - name: asset-intelligence-hub
+    kind: client-engagement-and-platform
+    linear_project: Asset Intelligence Hub  # + ARA (Revere) — same repo
+    serves_clients: [Revere Capital]
+    priority: high
+    started: 2026-04-22
+    url: git@github.com:OgenticAI/asset-intelligence-hub.git
+    description: |
+      Asset intelligence substrate AND Revere's ARA (Asset Reporting Agent).
+      Migrated to Next.js + Prisma + BetterAuth canonical stack. Codex-aligned
+      demo reporting + durable storage.
+    stacks: [nextjs, prisma, betterauth, typescript]
+    recent_prs: 2
+    sample_titles:
+      - "Migrate ARA to Next.js+Prisma+BetterAuth canonical stack"
+      - "[codex] align demo reporting and durable storage"
+    factory_notes: |
+      LINEAR DUPLICATE: there was a planned "revere-ara" client repo in v2
+      of this registry — that's THIS repo. Asset Intelligence Hub and Revere
+      ARA share a codebase.
+
+  # ─── Knowledge Agent ────────────────────────────────────────────────────
+  - name: agent-knowledge
+    kind: internal-agent
+    linear_project: Knowledge Agent
+    priority: high
+    url: git@github.com:OgenticAI/agent-knowledge.git
+    domain: orgknowledge.ogenticai.com
+    description: |
+      Multi-tenant org-knowledge chat. Drive / Notion / Slack / GitHub / Microsoft
+      MCPs. Verified-domain auto-join.
+    stacks: [nextjs, typescript, python, mcps]
+    recent_prs: 2
+    sample_titles:
+      - "chore: install OgenticAI Reviewer (UAT-checklist gate)"
+    depends_on:
+      - ogentic-shield
+      - ogentic-audit
+    factory_notes: |
+      Low recent PR count but stated as in-progress in Linear. Sample titles
+      only show the OgenticAI Reviewer install — real feature work may not
+      yet have landed.
+
+  # ─── Synthetic Testing ──────────────────────────────────────────────────
+  - name: agent-synthetictesting
+    kind: platform-tool
+    linear_project: Synthetic Testing Infrastructure
+    priority: high
+    url: git@github.com:OgenticAI/agent-synthetictesting.git
+    description: |
+      Automated walkthrough + regression suite for live agents and Sotto Desktop.
+      Has `/uat-override` mechanism for verification flows.
+    stacks: [typescript]
+    recent_prs: 2
+    sample_titles:
+      - "chore(OGE-380): throwaway PR — live install + /uat-override verification"
+    factory_notes: |
+      The AI Eval Engineer agent in the factory should target this repo as
+      the canonical eval harness host once it's operational.
+
+  # ─── Covenant Monitor ───────────────────────────────────────────────────
+  - name: agentcovenant
+    kind: vertical-agent
+    vertical: private-credit
+    linear_project: Covenant Monitor Agent
+    priority: high
+    url: git@github.com:OgenticAI/agentcovenant.git
+    description: Post-close covenant compliance monitor against executed credit agreements.
+    stacks: [nextjs, prisma, betterauth, typescript]
+    recent_prs: 2
+    sample_titles:
+      - "chore: install OgenticAI Reviewer (UAT-checklist gate)"
+    builder_agents:
+      - backend-builder-typescript
+      - frontend-builder
+      - test-verifier
+      - ai-eval-engineer
+      - validator
+      - security-reviewer
+      - compliance-reviewer
+    depends_on:
+      - ogentic-shield
+      - ogentic-audit
+
+  # ─── Sotto family (core/templates) ──────────────────────────────────────
+  - name: sotto
+    kind: platform
+    linear_project: "(supports: Therapy Vertical, Sotto Desktop)"
+    priority: high
+    url: git@github.com:OgenticAI/sotto.git
+    description: |
+      Sotto-family core: skills + templates + rollout artefacts shared across
+      Sotto Desktop and any future Sotto verticals (e.g. Sotto for Therapists).
+    stacks: [typescript, templates]
+    recent_prs: 1
+    sample_titles:
+      - "feat: Sotto-family context distribution (skills + templates + rollout) (OGE-390)"
+    factory_notes: |
+      Therapy vertical (Sotto for Therapists) is not its own repo yet — it
+      will probably live as a vertical of `sotto` or as a new `sotto-therapy`
+      repo. Confirm before installing the factory in a "Therapy" workspace.
+
+  # ─── AI Assessment Agent ────────────────────────────────────────────────
+  - name: ai-assessment
+    kind: internal-agent
+    linear_project: AI Assessment Agent
+    priority: high
+    url: git@github.com:OgenticAI/ai-assessment.git
+    description: |
+      Lead-gen discovery for ISO 42001 / 9001 AI governance readiness.
+      Migrated to canonical stack with HMAC audit chain.
+    stacks: [nextjs, prisma, betterauth, typescript]
+    recent_prs: 1
+    sample_titles:
+      - "feat: canonical stack migration + observability + HMAC audit chain (OGE-164/165/...)"
+
+  # ─── ogentic-secure-ai (UNKNOWN — clarify with David) ───────────────────
+  - name: ogentic-secure-ai
+    kind: unknown
+    linear_project: "(not mapped — see open questions)"
+    priority: unknown
+    url: git@github.com:OgenticAI/ogentic-secure-ai.git
+    description: |
+      Detected in PR history but not mapped to a Linear project. Migrated to
+      canonical stack with HMAC audit chain. Looks like a foundational
+      "secure AI" wrapper — could be the platform underlying many other
+      agents, or an early draft of one of the Wave 2 OSS libs.
+    stacks: [nextjs, prisma, betterauth, typescript]
+    recent_prs: 1
+    sample_titles:
+      - "feat: canonical stack migration + observability + HMAC audit chain (OGE-164/165/...)"
+    factory_notes: |
+      OPEN QUESTION: what is this? See open_questions section below.
+
+  # ─── SWS Billing Bot ────────────────────────────────────────────────────
+  - name: sws-billing-bot
+    kind: client-engagement
+    client: SWS
+    linear_project: SWS Billing Agent
+    priority: medium
+    url: git@github.com:OgenticAI/sws-billing-bot.git
+    description: Billing automation agent for SWS.
+    stacks: [unknown]    # only PR seen is the canonical-stack migration
+    recent_prs: 1
+    sample_titles:
+      - "Migrate Billing Agent to Ogentic Standard Stack"
+
+# ──────────────────────────────────────────────────────────────────────────
+# LINEAR PROJECTS WITHOUT A REPO YET
+# (Projects in Linear that have no matching GitHub repo with recent activity.)
+# ──────────────────────────────────────────────────────────────────────────
+
+linear_projects_without_repo:
+
+  # Wave 2 OSS — all targeting 2026-09-30, no GitHub presence yet
+  - name: Ogentic-Router (OSS)
+    expected_repo: ogentic-router
+    wave: 2
+    notes: "Wave 2 OSS. Likely needs a fresh repo by end of June to hit target."
+  - name: Ogentic-Redact (OSS)
+    expected_repo: ogentic-redact
+    wave: 2
+  - name: Ogentic-Converter (OSS)
+    expected_repo: ogentic-converter
+    wave: 2
+  - name: Ogentic-Adapter-SDK (OSS)
+    expected_repo: ogentic-adapter-sdk
+    wave: 2
+
+  # Vertical agents — Linear projects without a dedicated repo
+  - name: Therapy Vertical (Sotto for Therapists)
+    expected_repo: sotto-therapy   # or vertical of `sotto`
+    notes: "May live inside `sotto` repo as a vertical. Confirm."
+  - name: Risk Assessment Agent
+    expected_repo: agent-riskassessment
+    notes: "Probable `agent-*` naming based on pattern."
+  - name: IC Memo Generator (Platform)
+    expected_repo: agent-icmemo
+  - name: Portfolio Monitor Agent
+    expected_repo: agent-portfoliomonitor
+  - name: RFP Navigator Agent
+    expected_repo: agent-rfpnavigator
+  - name: Contractor Lifecycle Ops Agent
+    expected_repo: agent-contractor
+    lead: Dennis Howell
+  - name: Job Description Agent
+    expected_repo: agent-jd
+  - name: Deal Intelligence Inbound (HubSpot)
+    expected_repo: agent-dealinbound
+
+  # Client engagements without dedicated repos (probably reuse a platform repo)
+  - name: IC Memo Agent (Revere)
+    notes: "Probably reuses ic-memo-generator once it exists, with Revere config."
+
+  # Desktop browser products
+  - name: Zing Browser (Electron)
+    expected_repo: zing-flow
+    notes: "Not yet in GitHub org. May be private/elsewhere."
+  - name: Zing Browser (Chromium fork)
+    expected_repo: zing-browser
+
+  # Platform / operational projects
+  - name: Platform Foundations
+    notes: "Likely cross-cutting across existing repos — may not need its own repo."
+  - name: Trust & Compliance
+    notes: "Likely cross-cutting; may surface as docs in zashboard-ultimate."
+  - name: CTO Operations
+    notes: "Operational, not a code repo."
+  - name: GTM & Content
+    notes: "Marketing, not code."
+  - name: Experiments and Sunset
+    notes: "Holding pen."
+
+# ──────────────────────────────────────────────────────────────────────────
+# WAVES
+# ──────────────────────────────────────────────────────────────────────────
+
+waves:
+  oss_wave_1:
+    target_date: 2026-05-31    # Shield
+    repos: [ogentic-shield, ogentic-audit]    # Audit target 2026-06-30
+  oss_wave_2:
+    target_date: 2026-09-30
+    expected_repos: [ogentic-router, ogentic-redact, ogentic-converter, ogentic-adapter-sdk]
+    notes: "Repos do not yet exist on GitHub."
+
+# ──────────────────────────────────────────────────────────────────────────
+# CROSS-REPO TEST SUITE
+# ──────────────────────────────────────────────────────────────────────────
+
+cross_repo_tests:
+  command: |
+    cd /tmp/cross-checkout
+    pnpm install
+    pnpm run test:cross-repo
+  description: |
+    To be hosted by agent-synthetictesting once it ships its harness. Until
+    then use per-repo acceptance tests.
+
+# ──────────────────────────────────────────────────────────────────────────
+# OPEN QUESTIONS — for David to resolve so the registry is fully grounded
+# ──────────────────────────────────────────────────────────────────────────
+
+open_questions:
+  - "What is `ogentic-secure-ai`? It exists with a canonical-stack migration PR but no Linear project maps to it. Is it a Wave-2 OSS lib in disguise, a platform base, or a deprecated direction?"
+  - "Linear team / label prefixes ADR, WAVE, DSM, LAYER are visible in PR titles alongside OGE. Are these separate Linear teams, or workspace-level labels? The Cross-Repo Coordinator needs to know what to track."
+  - "Is `agent-dealsizer` the canonical Sizer agent for all future client sizing engagements, or do new clients get their own forks?"
+  - "Where will Wave-2 OSS repos (ogentic-router, ogentic-redact, ogentic-converter, ogentic-adapter-sdk) live? Same OgenticAI org, same naming, or different?"
+  - "Where will Therapy Vertical live — inside the `sotto` repo or a new `sotto-therapy` repo?"
+  - "Where do IC Memo Agent (Revere) variants live? Forks of the (not-yet-existing) ic-memo-generator, or branches within a single repo?"
+  - "Zing Browser and Zing Flow have no GitHub presence under OgenticAI org. Different org? Private?"
+  - "Branch convention check: PR titles carry OGE-NNN but I haven't sampled branch names directly. Confirm: feature/* branch names with OGE-NNN in commit titles is the canonical pattern."
