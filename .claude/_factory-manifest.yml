@@ -6,7 +6,7 @@ factory_source: "https://github.com/OgenticAI/agent-factory"
 
 synced_kit_sha: "24b74a662d3fd3fa1fcf5b5bb9754b9d84ce3914"
 synced_kit_hash: "f9d59824f0cbe48dd1eaa6114aff4258d53d5686c61b671a9830de0877e30935"
-synced_at: "2026-06-24T10:19:20.494171+00:00"
+synced_at: "2026-06-24T10:37:13.560623+00:00"
 
 files:
   - path: .claude/CLAUDE-FACTORY.md
