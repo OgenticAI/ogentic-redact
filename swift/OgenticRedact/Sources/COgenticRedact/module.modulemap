@@ -1,0 +1,4 @@
+module COgenticRedact {
+    header "ogentic_redact.h"
+    export *
+}

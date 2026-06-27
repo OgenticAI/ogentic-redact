@@ -1,0 +1,25 @@
+[package]
+name = "ogentic-redact"
+description = "ogentic-redact CLI — redact sensitive content from files and streams"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "ogentic-redact"
+path = "src/main.rs"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+ogentic-redact-core = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }

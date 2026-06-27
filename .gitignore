@@ -1,0 +1,68 @@
+# Rust
+/target/
+**/*.rs.bk
+# Cargo.lock is committed at the workspace root because we ship a binary
+# crate (ogentic-redact-cli). Standard Rust convention.
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Node
+node_modules/
+*.node
+dist/
+.npm/
+
+# Swift / Xcode
+.build/
+*.xcworkspace
+*.xcodeproj
+DerivedData/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+Thumbs.db
+
+# Docs build
+docs/_build/
+docs/python/_build/
+
+# Test artifacts
+tests/vectors/.tmp/
+
+# Claude Code session metadata (per-user, never committed)
+.claude/scheduled_tasks.lock

@@ -1,0 +1,3 @@
+# CODEOWNERS — default reviewers for all files.
+# GitHub will request a review from these users on every PR.
+* @davidoladeji-ogenticai
