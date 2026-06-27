@@ -1,0 +1,19 @@
+[package]
+name = "ogentic-redact-py"
+description = "ogentic-redact Python bindings (PyO3)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lib]
+name = "ogentic_redact"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+ogentic-redact-core = { workspace = true }
+pyo3 = { workspace = true }
