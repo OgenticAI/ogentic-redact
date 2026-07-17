@@ -1,0 +1,41 @@
+{
+  "name": "@ogenticai/redact",
+  "version": "0.1.0",
+  "description": "Real-time, on-device sensitive-content redaction — Node.js bindings",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OgenticAI/ogentic-redact"
+  },
+  "bugs": {
+    "url": "https://github.com/OgenticAI/ogentic-redact/issues"
+  },
+  "homepage": "https://github.com/OgenticAI/ogentic-redact",
+  "keywords": ["redact", "pii", "privacy", "nlp"],
+  "engines": {
+    "node": ">= 16"
+  },
+  "napi": {
+    "binaryName": "ogentic-redact",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "scripts": {
+    "artifacts": "napi artifacts",
+    "build": "napi build --platform --release",
+    "prepublishOnly": "napi prepublish -t npm"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0"
+  },
+  "optionalDependencies": {
+    "@ogenticai/redact-linux-x64-gnu": "0.1.0",
+    "@ogenticai/redact-darwin-arm64": "0.1.0",
+    "@ogenticai/redact-win32-x64-msvc": "0.1.0"
+  }
+}

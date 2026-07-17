@@ -1,0 +1,14 @@
+{
+  "name": "@ogenticai/redact-darwin-arm64",
+  "version": "0.1.0",
+  "description": "@ogenticai/redact native binary for darwin-arm64",
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "main": "ogentic-redact.darwin-arm64.node",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OgenticAI/ogentic-redact"
+  },
+  "files": ["ogentic-redact.darwin-arm64.node"]
+}

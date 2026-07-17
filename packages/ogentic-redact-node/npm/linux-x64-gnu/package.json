@@ -1,0 +1,14 @@
+{
+  "name": "@ogenticai/redact-linux-x64-gnu",
+  "version": "0.1.0",
+  "description": "@ogenticai/redact native binary for linux-x64-gnu",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "main": "ogentic-redact.linux-x64-gnu.node",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OgenticAI/ogentic-redact"
+  },
+  "files": ["ogentic-redact.linux-x64-gnu.node"]
+}
