@@ -1,0 +1,5 @@
+# This directory holds the pre-built Rust static library
+# (libogentic_redact_ffi.a) needed by the Swift package.
+#
+# The .a file is NOT committed to git.
+# Build it with: scripts/build-swift-ffi.sh

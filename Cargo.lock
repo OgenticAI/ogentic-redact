@@ -284,6 +284,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ogentic-redact-ffi"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "ogentic-redact-node"
 version = "0.1.0"
 dependencies = [

@@ -4,6 +4,7 @@ members = [
     "crates/ogentic-redact-core",
     "crates/ogentic-redact-cli",
     "crates/ogentic-redact-rules",
+    "crates/ogentic-redact-ffi",
     "python/ogentic-redact-py",
     "packages/ogentic-redact-node",
 ]
