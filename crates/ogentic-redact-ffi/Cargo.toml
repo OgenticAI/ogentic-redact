@@ -1,0 +1,25 @@
+[package]
+name = "ogentic-redact-ffi"
+description = "C FFI shim for ogentic-redact-core — exposes redact/unredact/redact_stream over a stable C ABI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lib]
+name = "ogentic_redact_ffi"
+path = "src/lib.rs"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+serde_json = { workspace = true }
+
+[build-dependencies]
+# cbindgen is run manually via `scripts/build-swift-ffi.sh` to regenerate
+# ogentic_redact.h; it is not a compile-time dependency of the crate itself.
+
+[package.metadata.docs.rs]
+targets = ["aarch64-apple-darwin"]

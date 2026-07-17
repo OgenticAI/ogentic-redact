@@ -1,0 +1,49 @@
+name: swift-ffi
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - "crates/ogentic-redact-ffi/**"
+      - "swift/OgenticRedact/**"
+      - "scripts/build-swift-ffi.sh"
+      - ".github/workflows/swift-ffi.yml"
+  pull_request:
+    paths:
+      - "crates/ogentic-redact-ffi/**"
+      - "swift/OgenticRedact/**"
+      - "scripts/build-swift-ffi.sh"
+      - ".github/workflows/swift-ffi.yml"
+
+jobs:
+  swift-ffi:
+    name: Swift FFI tests (Apple Silicon)
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/aarch64-apple-darwin/release/
+          key: ${{ runner.os }}-cargo-ffi-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-ffi-
+
+      - name: Rust unit tests (ogentic-redact-ffi)
+        run: cargo test --package ogentic-redact-ffi
+
+      - name: Build static library for arm64
+        run: bash scripts/build-swift-ffi.sh
+
+      - name: Swift tests (F3 golden vectors)
+        run: swift test --package-path swift/OgenticRedact
