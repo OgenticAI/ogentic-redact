@@ -444,7 +444,10 @@ impl RedactOneWayResult {
 /// Detected patterns: email address, US phone number, US Social Security Number.
 pub fn redact_one_way(text: &str) -> RedactOneWayResult {
     let (out_text, tokens) = redact_one_way_inner(text);
-    RedactOneWayResult { text: out_text, tokens }
+    RedactOneWayResult {
+        text: out_text,
+        tokens,
+    }
 }
 
 /// Restore redacted placeholders using the token map from a prior

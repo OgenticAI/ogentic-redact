@@ -135,7 +135,7 @@ fn try_match_email(b: &[u8], pos: usize) -> Option<(String, usize)> {
     }
     let at = i;
     i += 1; // skip @
-    // domain label
+            // domain label
     if i >= b.len() || !b[i].is_ascii_alphanumeric() {
         return None;
     }
@@ -525,7 +525,10 @@ mod tests {
     fn email_detected() {
         let (out, tokens) = redact_core("Contact alice@example.com for info.");
         assert!(out.contains("[EMAIL_1]"), "email not redacted: {out}");
-        assert_eq!(tokens.get("[EMAIL_1]").map(|s| s.as_str()), Some("alice@example.com"));
+        assert_eq!(
+            tokens.get("[EMAIL_1]").map(|s| s.as_str()),
+            Some("alice@example.com")
+        );
         assert!(!out.contains("alice@example.com"));
     }
 
@@ -533,21 +536,30 @@ mod tests {
     fn phone_dash_format() {
         let (out, tokens) = redact_core("Call 555-867-5309 now.");
         assert!(out.contains("[PHONE_1]"), "phone not redacted: {out}");
-        assert_eq!(tokens.get("[PHONE_1]").map(|s| s.as_str()), Some("555-867-5309"));
+        assert_eq!(
+            tokens.get("[PHONE_1]").map(|s| s.as_str()),
+            Some("555-867-5309")
+        );
     }
 
     #[test]
     fn phone_parens_format() {
         let (out, tokens) = redact_core("Reach me at (415) 555-0100.");
         assert!(out.contains("[PHONE_1]"), "phone not redacted: {out}");
-        assert_eq!(tokens.get("[PHONE_1]").map(|s| s.as_str()), Some("(415) 555-0100"));
+        assert_eq!(
+            tokens.get("[PHONE_1]").map(|s| s.as_str()),
+            Some("(415) 555-0100")
+        );
     }
 
     #[test]
     fn ssn_detected() {
         let (out, tokens) = redact_core("SSN: 123-45-6789.");
         assert!(out.contains("[SSN_1]"), "SSN not redacted: {out}");
-        assert_eq!(tokens.get("[SSN_1]").map(|s| s.as_str()), Some("123-45-6789"));
+        assert_eq!(
+            tokens.get("[SSN_1]").map(|s| s.as_str()),
+            Some("123-45-6789")
+        );
     }
 
     #[test]

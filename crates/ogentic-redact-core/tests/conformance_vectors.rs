@@ -37,10 +37,13 @@ fn f3_vectors_rust_surface() {
     let path = vectors_path();
     let json = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-    let file: VectorFile = serde_json::from_str(&json)
-        .unwrap_or_else(|e| panic!("cannot parse vectors.json: {e}"));
+    let file: VectorFile =
+        serde_json::from_str(&json).unwrap_or_else(|e| panic!("cannot parse vectors.json: {e}"));
 
-    assert!(!file.vectors.is_empty(), "vectors.json must contain at least one vector");
+    assert!(
+        !file.vectors.is_empty(),
+        "vectors.json must contain at least one vector"
+    );
 
     for v in &file.vectors {
         let result = ogentic_redact_core::redact_one_way(&v.input);
