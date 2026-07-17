@@ -51,10 +51,12 @@ let package = Package(
         ),
 
         // Test target — requires `libogentic_redact_ffi.a` to be present.
+        // `Resources/vectors.json` is the shared F3 conformance vector file.
         .testTarget(
             name: "OgenticRedactTests",
             dependencies: ["OgenticRedact"],
-            path: "Tests/OgenticRedactTests"
+            path: "Tests/OgenticRedactTests",
+            resources: [.copy("Resources/vectors.json")]
         ),
     ]
 )

@@ -1,0 +1,142 @@
+name: F3 Cross-Language Conformance
+
+# OGE-1278: Run the F3 golden-vector conformance suite against all four binding
+# surfaces (Rust core, Python/PyO3, Node.js/napi-rs, Swift/C FFI) on every PR
+# and push to main.  Any byte-level divergence from conformance/vectors.json
+# fails the job.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Rust ──────────────────────────────────────────────────────────────────────
+  conformance-rust:
+    name: "Rust core"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cargo build (all workspace crates)
+        run: cargo build --workspace
+
+      - name: Run unit tests (ogentic-redact-core)
+        run: cargo test -p ogentic-redact-core
+
+      - name: Run F3 conformance integration test
+        run: cargo test -p ogentic-redact-core --test conformance_vectors
+
+  # ── Python ────────────────────────────────────────────────────────────────────
+  conformance-python:
+    name: "Python binding"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install maturin + pytest
+        run: pip install maturin pytest
+
+      - name: Build and install Python binding
+        run: maturin develop --release
+
+      - name: Run F3 conformance (Python surface)
+        run: pytest conformance/run_conformance.py -v
+
+  # ── Node.js ───────────────────────────────────────────────────────────────────
+  conformance-node:
+    name: "Node.js binding"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build napi-rs binding
+        run: |
+          cargo build --release -p ogentic-redact-node
+          # napi-rs generates the .node file in the package dir under target/
+          # Copy it to the package dir for the runner to locate it.
+          NODE_FILE=$(find target/release -name "libogentic_redact_node.so" | head -1)
+          if [ -z "$NODE_FILE" ]; then
+            echo "Warning: .so not found; trying .node glob"
+            NODE_FILE=$(find target -name "*.node" | head -1)
+          fi
+          if [ -n "$NODE_FILE" ]; then
+            cp "$NODE_FILE" packages/ogentic-redact-node/ogentic_redact_node.linux-x64-gnu.node 2>/dev/null || true
+          fi
+
+      - name: Run F3 conformance (Node.js surface)
+        run: node conformance/run_conformance.mjs
+
+  # ── Swift ─────────────────────────────────────────────────────────────────────
+  conformance-swift:
+    name: "Swift binding"
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable + aarch64 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Rust FFI static library
+        run: bash scripts/build-swift-ffi.sh
+
+      - name: Verify libogentic_redact_ffi.a is present
+        run: ls -lh swift/OgenticRedact/lib/libogentic_redact_ffi.a
+
+      - name: Run F3 conformance (Swift surface)
+        run: |
+          swift test \
+            --package-path swift/OgenticRedact \
+            --filter ConformanceVectorTests \
+            -v
+
+      - name: Run full Swift test suite
+        run: |
+          swift test \
+            --package-path swift/OgenticRedact \
+            -v

@@ -1,0 +1,138 @@
+{
+  "version": "f3",
+  "description": "F3 golden vectors — cross-language conformance contract for ogentic-redact. All four surfaces (Rust, Python, Node.js, Swift) must produce byte-identical `text` and `tokens` output for each vector.",
+  "vectors": [
+    {
+      "id": "email-simple-001",
+      "description": "Single email in a sentence",
+      "input": "Contact alice@example.com for details.",
+      "expected_text": "Contact [EMAIL_1] for details.",
+      "expected_tokens": {
+        "[EMAIL_1]": "alice@example.com"
+      }
+    },
+    {
+      "id": "email-subdomain-002",
+      "description": "Email with subdomain in domain part",
+      "input": "Forward to bob.smith@mail.corp.io now.",
+      "expected_text": "Forward to [EMAIL_1] now.",
+      "expected_tokens": {
+        "[EMAIL_1]": "bob.smith@mail.corp.io"
+      }
+    },
+    {
+      "id": "email-plus-tag-003",
+      "description": "Email with + tag in local part",
+      "input": "Reply to carol+tag@example.org.",
+      "expected_text": "Reply to [EMAIL_1].",
+      "expected_tokens": {
+        "[EMAIL_1]": "carol+tag@example.org"
+      }
+    },
+    {
+      "id": "phone-dash-004",
+      "description": "US phone in NXX-NXX-XXXX dash format",
+      "input": "Call 555-867-5309 for support.",
+      "expected_text": "Call [PHONE_1] for support.",
+      "expected_tokens": {
+        "[PHONE_1]": "555-867-5309"
+      }
+    },
+    {
+      "id": "phone-parens-005",
+      "description": "US phone in (NXX) NXX-XXXX parenthesis format",
+      "input": "Office: (415) 555-0100.",
+      "expected_text": "Office: [PHONE_1].",
+      "expected_tokens": {
+        "[PHONE_1]": "(415) 555-0100"
+      }
+    },
+    {
+      "id": "phone-e164-006",
+      "description": "US phone in +1-NXX-NXX-XXXX E.164 format",
+      "input": "Text +1-800-555-0199 anytime.",
+      "expected_text": "Text [PHONE_1] anytime.",
+      "expected_tokens": {
+        "[PHONE_1]": "+1-800-555-0199"
+      }
+    },
+    {
+      "id": "ssn-basic-007",
+      "description": "US Social Security Number DDD-DD-DDDD",
+      "input": "Patient SSN is 123-45-6789.",
+      "expected_text": "Patient SSN is [SSN_1].",
+      "expected_tokens": {
+        "[SSN_1]": "123-45-6789"
+      }
+    },
+    {
+      "id": "clean-passthrough-008",
+      "description": "Plain text with no PII — must pass through unchanged",
+      "input": "The quick brown fox jumps over the lazy dog.",
+      "expected_text": "The quick brown fox jumps over the lazy dog.",
+      "expected_tokens": {}
+    },
+    {
+      "id": "empty-string-009",
+      "description": "Empty input — must return empty output",
+      "input": "",
+      "expected_text": "",
+      "expected_tokens": {}
+    },
+    {
+      "id": "email-at-sentence-end-010",
+      "description": "Email at sentence end — trailing period must NOT be consumed",
+      "input": "Send mail to support@example.com.",
+      "expected_text": "Send mail to [EMAIL_1].",
+      "expected_tokens": {
+        "[EMAIL_1]": "support@example.com"
+      }
+    },
+    {
+      "id": "multi-entity-email-phone-011",
+      "description": "Both email and phone in the same string",
+      "input": "Email alice@example.com or call 555-867-5309.",
+      "expected_text": "Email [EMAIL_1] or call [PHONE_1].",
+      "expected_tokens": {
+        "[EMAIL_1]": "alice@example.com",
+        "[PHONE_1]": "555-867-5309"
+      }
+    },
+    {
+      "id": "multi-email-012",
+      "description": "Two emails — numbered EMAIL_1 and EMAIL_2 in scan order",
+      "input": "From alice@a.com to bob@b.com for the meeting.",
+      "expected_text": "From [EMAIL_1] to [EMAIL_2] for the meeting.",
+      "expected_tokens": {
+        "[EMAIL_1]": "alice@a.com",
+        "[EMAIL_2]": "bob@b.com"
+      }
+    },
+    {
+      "id": "unicode-adjacent-013",
+      "description": "ASCII email adjacent to non-ASCII surrounding text",
+      "input": "Héllo, contact info@example.com today.",
+      "expected_text": "Héllo, contact [EMAIL_1] today.",
+      "expected_tokens": {
+        "[EMAIL_1]": "info@example.com"
+      }
+    },
+    {
+      "id": "streaming-multi-sentence-014",
+      "description": "Two sentences — streaming splits on period after each sentence",
+      "input": "Hello alice@example.com. Call 555-867-5309 tomorrow.",
+      "expected_text": "Hello [EMAIL_1]. Call [PHONE_1] tomorrow.",
+      "expected_tokens": {
+        "[EMAIL_1]": "alice@example.com",
+        "[PHONE_1]": "555-867-5309"
+      }
+    },
+    {
+      "id": "ssn-not-adjacent-digit-015",
+      "description": "SSN-like pattern preceded by digit must NOT be matched",
+      "input": "Code 1123-45-6789 is not an SSN.",
+      "expected_text": "Code 1123-45-6789 is not an SSN.",
+      "expected_tokens": {}
+    }
+  ]
+}
