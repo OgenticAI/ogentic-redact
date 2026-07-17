@@ -6,6 +6,10 @@
 //!   `{"text": str, "tokens": dict[str, str]}`.
 //! - `unredact(text, tokens) -> str` — restore redacted text from the token map.
 
+// PyO3 0.22 macro expansion produces useless Into<PyErr> conversions that
+// clippy flags as `useless_conversion`.  Suppress at the crate level.
+#![allow(clippy::useless_conversion)]
+
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashMap;

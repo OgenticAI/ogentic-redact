@@ -1,0 +1,248 @@
+name: CI
+
+# OGE-1282: Full pipeline — format, lint, test, dependency security scan,
+# coverage, and sub-100ms streaming performance budget gate.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Rust: format + lint ───────────────────────────────────────────────────────
+  lint-rust:
+    name: "Rust lint (fmt + clippy)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable (with rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt check
+        run: cargo fmt --all --check
+
+      - name: clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # ── Rust: tests ───────────────────────────────────────────────────────────────
+  test-rust:
+    name: "Rust tests"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run workspace tests
+        run: cargo test --workspace
+
+  # ── Rust: dependency security scan ───────────────────────────────────────────
+  audit-rust:
+    name: "Rust dependency audit"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version "^0.21"
+
+      - name: Run cargo-audit
+        run: cargo audit
+
+  # ── Rust: coverage ────────────────────────────────────────────────────────────
+  coverage-rust:
+    name: "Rust coverage"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --locked --version "^0.31"
+
+      - name: Run coverage (Rust workspace)
+        run: >
+          cargo tarpaulin
+          --workspace
+          --exclude ogentic-redact-node
+          --exclude ogentic-redact-py
+          --timeout 120
+          --out Xml
+          --output-dir coverage/
+
+      - name: Upload Rust coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-coverage
+          path: coverage/cobertura.xml
+          retention-days: 7
+
+      - name: Report coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage/cobertura.xml
+          flags: rust
+          fail_ci_if_error: false
+
+  # ── Python: lint + tests + coverage ──────────────────────────────────────────
+  coverage-python:
+    name: "Python tests + coverage"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          pip install \
+            maturin \
+            pytest \
+            pytest-cov \
+            ruff \
+            mypy \
+            presidio-analyzer \
+            presidio-anonymizer \
+            "spacy>=3.7"
+          python -m spacy download en_core_web_sm
+
+      - name: Build and install Python binding
+        run: maturin develop --release
+
+      - name: ruff lint
+        run: ruff check python/ogentic_redact/
+
+      - name: mypy type-check
+        run: mypy python/ogentic_redact/
+
+      - name: pytest with coverage
+        run: >
+          pytest
+          python/tests/
+          --cov=ogentic_redact
+          --cov-report=term-missing
+          --cov-report=xml:coverage/python-coverage.xml
+          -v
+
+      - name: Upload Python coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-coverage
+          path: coverage/python-coverage.xml
+          retention-days: 7
+
+      - name: Report coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage/python-coverage.xml
+          flags: python
+          fail_ci_if_error: false
+
+  # ── Rust: criterion benchmark (informational) ─────────────────────────────────
+  bench-rust:
+    name: "Rust benchmark (criterion)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run criterion benchmarks
+        run: >
+          cargo bench
+          -p ogentic-redact-core
+          --
+          --output-format bencher
+          | tee bench-output.txt
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-rust
+          path: bench-output.txt
+          retention-days: 7
+
+  # ── Python: streaming performance budget gate ─────────────────────────────────
+  bench-python:
+    name: "Python streaming latency gate (<= 100 ms/chunk)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          pip install \
+            maturin \
+            presidio-analyzer \
+            presidio-anonymizer \
+            "spacy>=3.7"
+          python -m spacy download en_core_web_sm
+
+      - name: Build and install Python binding
+        run: maturin develop --release
+
+      - name: Run latency benchmark (fails if median > 100 ms)
+        run: python python/tests/bench_stream.py
