@@ -71,3 +71,7 @@ tests/vectors/.tmp/
 
 # Claude Code session metadata (per-user, never committed)
 .claude/scheduled_tasks.lock
+
+# Linear MCP server debug log — written into the repo root by whichever
+# directory the server is launched from. Local tooling output, not ours.
+linear_api.log
