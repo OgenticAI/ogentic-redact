@@ -153,6 +153,7 @@ jobs:
             maturin \
             pytest \
             pytest-cov \
+            hypothesis \
             ruff \
             mypy \
             presidio-analyzer \
