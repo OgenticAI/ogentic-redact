@@ -59,6 +59,14 @@ jobs:
         with:
           python-version: "3.11"
 
+      # `maturin develop` installs into an interpreter, so it refuses to run
+      # without a virtualenv. Create one and put it on PATH for later steps.
+      - name: Create virtualenv
+        run: |
+          python -m venv .venv
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
       - name: Install maturin + pytest
         run: pip install maturin pytest
 

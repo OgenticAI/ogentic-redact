@@ -69,8 +69,10 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      # 0.21.x predates CVSS 4.0 and aborts with "unsupported CVSS version: 4.0"
+      # as soon as any advisory in the DB carries a v4 score.
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked --version "^0.21"
+        run: cargo install cargo-audit --locked --version "^0.22"
 
       - name: Run cargo-audit
         run: cargo audit
@@ -136,6 +138,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      # `maturin develop` installs into an interpreter, so it refuses to run
+      # without a virtualenv. Create one and put it on PATH for later steps.
+      - name: Create virtualenv
+        run: |
+          python -m venv .venv
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Install Python dependencies
         run: |
@@ -231,6 +241,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      # See coverage-python: maturin develop requires an active virtualenv.
+      - name: Create virtualenv
+        run: |
+          python -m venv .venv
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Install Python dependencies
         run: |
