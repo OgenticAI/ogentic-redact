@@ -6,10 +6,6 @@
 //!   `{"text": str, "tokens": dict[str, str]}`.
 //! - `unredact(text, tokens) -> str` — restore redacted text from the token map.
 
-// PyO3 0.22 macro expansion produces useless Into<PyErr> conversions that
-// clippy flags as `useless_conversion`.  Suppress at the crate level.
-#![allow(clippy::useless_conversion)]
-
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashMap;
@@ -31,16 +27,16 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 ///
 /// Output is byte-identical to the Node.js and Swift bindings for the same input.
 #[pyfunction]
-fn redact(py: Python<'_>, text: &str) -> PyResult<PyObject> {
+fn redact<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyDict>> {
     let result = ogentic_redact_core::redact_one_way(text);
-    let d = PyDict::new_bound(py);
+    let d = PyDict::new(py);
     d.set_item("text", &result.text)?;
-    let tokens_dict = PyDict::new_bound(py);
+    let tokens_dict = PyDict::new(py);
     for (k, v) in &result.tokens {
         tokens_dict.set_item(k, v)?;
     }
     d.set_item("tokens", tokens_dict)?;
-    Ok(d.into())
+    Ok(d)
 }
 
 /// Restore redacted placeholders in `text` using `tokens`.

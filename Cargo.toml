@@ -12,7 +12,8 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.77"
+# Floor set by pyo3 0.29, which declares rust-version = "1.83".
+rust-version = "1.83"
 license = "Apache-2.0"
 repository = "https://github.com/OgenticAI/ogentic-redact"
 homepage = "https://github.com/OgenticAI/ogentic-redact"
@@ -35,7 +36,7 @@ serde_json = "1"
 clap = { version = "4.5", features = ["derive"] }
 
 # Bindings
-pyo3 = { version = "0.22", features = ["extension-module", "abi3-py311"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py311"] }
 
 # Testing
 proptest = "1.4"
