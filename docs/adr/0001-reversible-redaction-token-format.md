@@ -3,11 +3,20 @@
 | Field      | Value                                      |
 |------------|--------------------------------------------|
 | **Number** | 0001                                       |
-| **Status** | Accepted                                   |
+| **Status** | **Superseded by [ADR-0003](0003-ecosystem-token-grammar.md)** (2026-07-23) |
 | **Date**   | 2026-07-16                                 |
 | **Ticket** | [OGE-1185](https://linear.app/ogenticai/issue/OGE-1185) |
 | **Deciders** | David (CTO)                              |
 | **Consulted** | OGE-1188 (test vectors), OGE-1192 (threat model), OGE-934 (demo design) |
+
+> **Superseded (2026-07-23, OGE-1684).** This ADR's grammar (`[[CATEGORY_nn]]`) was accepted but never
+> implemented, and its central security claim does not hold: the per-call salt (§2d) only produces an
+> in-memory grouping key that never reaches the emitted token, and counters are assigned by document
+> order — so the same document yields identical tokens every call, and the cross-call-correlation defense
+> in §5 is not delivered. [ADR-0003](0003-ecosystem-token-grammar.md) replaces the grammar with the
+> Shield-aligned `[Label_<salted-hex>]` form, in which the salt reaches the token and the defense holds.
+> The vault-record shape (§3) and the threat analysis (§5, as a description of the *threat*) remain useful
+> background; the grammar (§1) and salt algorithm (§2) are replaced. Read ADR-0003 for the authoritative spec.
 
 ---
 
