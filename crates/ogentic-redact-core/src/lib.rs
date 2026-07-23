@@ -115,8 +115,30 @@ pub struct Span {
 /// `Send + Sync` and may be shared across threads.
 #[derive(Debug, Default)]
 pub struct Vault {
-    mappings: Mutex<HashMap<String, HashMap<String, String>>>,
+    mappings: Mutex<HashMap<String, VaultRecord>>,
     counter: AtomicU64,
+}
+
+/// One reversible redaction call's worth of vault state (ADR-0003 §3).
+///
+/// Holds the per-call `call_salt` (so tokens are reproducible/auditable) plus,
+/// for each emitted token, the exact original and the `label`/`canonical`
+/// grouping form it was derived from.
+#[derive(Debug, Clone)]
+struct VaultRecord {
+    #[allow(dead_code)] // retained for auditing / future vault-export (OGE-1243)
+    call_salt: [u8; token::SALT_LEN],
+    entries: HashMap<String, VaultEntry>,
+}
+
+/// A single token→original mapping within a [`VaultRecord`].
+#[derive(Debug, Clone)]
+struct VaultEntry {
+    original: String,
+    #[allow(dead_code)] // retained for auditing / future vault-export (OGE-1243)
+    label: String,
+    #[allow(dead_code)]
+    canonical: String,
 }
 
 impl Vault {
@@ -125,18 +147,18 @@ impl Vault {
         Self::default()
     }
 
-    /// Store a token→original mapping and return its fresh `mapping_id`.
-    fn put(&self, mapping: HashMap<String, String>) -> String {
+    /// Store a redaction record and return its fresh `mapping_id`.
+    fn put(&self, record: VaultRecord) -> String {
         let id = self.next_id();
         self.mappings
             .lock()
             .expect("vault mutex poisoned")
-            .insert(id.clone(), mapping);
+            .insert(id.clone(), record);
         id
     }
 
-    /// Retrieve a clone of the mapping for `mapping_id`, or `None` if absent.
-    fn get(&self, mapping_id: &str) -> Option<HashMap<String, String>> {
+    /// Retrieve a clone of the record for `mapping_id`, or `None` if absent.
+    fn get(&self, mapping_id: &str) -> Option<VaultRecord> {
         self.mappings
             .lock()
             .expect("vault mutex poisoned")
@@ -238,51 +260,72 @@ fn dedupe_spans(spans: &mut Vec<Span>) {
 }
 
 // ---------------------------------------------------------------------------
-// Token helpers
+// Token assignment (ADR-0003 grammar via the `token` module)
 // ---------------------------------------------------------------------------
 
-/// Build the replacement token for a detected entity.
+/// Assign a `[Label_<salted-hex>]` token to every span under one `call_salt`.
 ///
-/// Format: `<<ENTITY_TYPE_N>>` (zero-indexed per type per document).
-/// Example: `<<EMAIL_0>>`, `<<EMAIL_1>>`, `<<PERSON_0>>`.
-fn make_token(entity_type: &str, index: usize) -> String {
-    format!("<<{entity_type}_{index}>>")
+/// Guarantees within-call stability (same `(label, canonical)` → same token)
+/// and resolves the rare within-call discriminator collision by extending that
+/// token to a longer hex (ADR-0003 §4). Returns the per-span tokens in span
+/// order plus the token→entry table for the vault.
+fn assign_tokens<'a>(
+    text: &'a str,
+    spans: &'a [Span],
+    call_salt: &[u8; token::SALT_LEN],
+) -> (Vec<(&'a Span, String)>, HashMap<String, VaultEntry>) {
+    let mut per_span: Vec<(&Span, String)> = Vec::with_capacity(spans.len());
+    let mut entries: HashMap<String, VaultEntry> = HashMap::new();
+    // (label, canonical) -> token, for within-call stability.
+    let mut seen: HashMap<(String, String), String> = HashMap::new();
+
+    for span in spans {
+        let original = &text[span.start..span.end];
+        let label = token::label_for(&span.entity_type);
+        let canonical = token::canonicalize(original);
+        let key = (label.clone(), canonical.clone());
+
+        let tok = if let Some(existing) = seen.get(&key) {
+            existing.clone()
+        } else {
+            let tok = unique_token(&label, &canonical, call_salt, &entries);
+            seen.insert(key, tok.clone());
+            entries.insert(
+                tok.clone(),
+                VaultEntry {
+                    original: original.to_owned(),
+                    label: label.clone(),
+                    canonical,
+                },
+            );
+            tok
+        };
+        per_span.push((span, tok));
+    }
+
+    (per_span, entries)
 }
 
-/// Scan `text` for `<<…>>` redaction tokens.
-///
-/// Returns a list of `(byte_start, byte_end, token_name)` tuples where
-/// `text[byte_start..byte_end]` is the full `<<TOKEN_NAME>>` pattern and
-/// `token_name` is the content between the angle brackets.
-fn scan_redaction_tokens(text: &str) -> Vec<(usize, usize, String)> {
-    let mut result = Vec::new();
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        if bytes[i] == b'<' && bytes[i + 1] == b'<' {
-            let outer_start = i;
-            i += 2;
-            let tok_start = i;
-            // Scan for closing ">>"; abort on nested "<" (malformed token).
-            while i + 1 < bytes.len() && !(bytes[i] == b'>' && bytes[i + 1] == b'>') {
-                if bytes[i] == b'<' {
-                    break; // Malformed — restart outer loop from current position.
-                }
-                i += 1;
-            }
-            if i + 1 < bytes.len() && bytes[i] == b'>' && bytes[i + 1] == b'>' {
-                let tok_end = i;
-                i += 2; // consume ">>"
-                if let Ok(name) = std::str::from_utf8(&bytes[tok_start..tok_end]) {
-                    result.push((outer_start, i, name.to_owned()));
-                }
-            }
-            // If we broke out without finding ">>", i is already advanced; continue.
-        } else {
-            i += 1;
-        }
+/// Build a token for `(label, canonical)`, extending the discriminator if the
+/// default 8-hex form already names a *different* original in `entries`.
+fn unique_token(
+    label: &str,
+    canonical: &str,
+    call_salt: &[u8; token::SALT_LEN],
+    entries: &HashMap<String, VaultEntry>,
+) -> String {
+    let short = token::discriminator(call_salt, label, canonical);
+    let candidate = token::emit(label, &short);
+    match entries.get(&candidate) {
+        // Free, or already ours (can't happen here — `seen` caught it) → use it.
+        None => candidate,
+        Some(e) if e.canonical == canonical => candidate,
+        // Genuine collision: two different values, same 8-hex. Extend to 12.
+        Some(_) => {
+            let full = token::full_discriminator(call_salt, label, canonical);
+            token::emit(label, &full[..token::DISCRIMINATOR_LEN_EXTENDED])
+        },
     }
-    result
 }
 
 // ---------------------------------------------------------------------------
@@ -328,39 +371,30 @@ pub fn redact(
         return Err(RedactError::VaultRequired);
     }
 
-    // Detect entities; assign zero-indexed tokens per entity type.
+    // Fresh per-call salt: the discriminator derives from it, so the same value
+    // yields a different token in a different call (ADR-0003 §3).
+    let call_salt: [u8; token::SALT_LEN] = rand::random();
+
     let spans = detect_entities(text);
-    let mut type_counts: HashMap<&str, usize> = HashMap::new();
-    let tokens: Vec<(&Span, String)> = spans
-        .iter()
-        .map(|span| {
-            let idx = type_counts.entry(span.entity_type.as_str()).or_insert(0);
-            let token = make_token(&span.entity_type, *idx);
-            *idx += 1;
-            (span, token)
-        })
-        .collect();
+    let (per_span, entries) = assign_tokens(text, &spans, &call_salt);
 
     // Splice the redacted string.
     let mut redacted = String::with_capacity(text.len());
     let mut cursor = 0usize;
-    for (span, token) in &tokens {
+    for (span, tok) in &per_span {
         redacted.push_str(&text[cursor..span.start]);
-        redacted.push_str(token);
+        redacted.push_str(tok);
         cursor = span.end;
     }
     redacted.push_str(&text[cursor..]);
 
-    // Reversible path: write token→original map to vault.
+    // Reversible path: persist the record (salt + entries) to the vault.
+    // One-way path emits the same salted grammar but keeps no mapping.
     if mode == RedactMode::Reversible {
-        let mapping: HashMap<String, String> = tokens
-            .iter()
-            .map(|(span, token)| (token.clone(), text[span.start..span.end].to_owned()))
-            .collect();
         // Safety: VaultRequired guard above ensures vault is Some here.
         let id = vault
             .expect("vault required; already checked above")
-            .put(mapping);
+            .put(VaultRecord { call_salt, entries });
         return Ok((redacted, Some(id)));
     }
 
@@ -378,13 +412,13 @@ pub fn redact(
 ///
 /// * [`RedactError::UnknownMappingId`] — `mapping_id` is not in the vault.
 pub fn unredact(text: &str, mapping_id: &str, vault: &Vault) -> Result<String, RedactError> {
-    let mapping = vault
+    let record = vault
         .get(mapping_id)
         .ok_or_else(|| RedactError::UnknownMappingId {
             mapping_id: mapping_id.to_owned(),
         })?;
 
-    let positions = scan_redaction_tokens(text);
+    let positions = token::parse_tokens(text);
     if positions.is_empty() {
         return Ok(text.to_owned());
     }
@@ -392,17 +426,17 @@ pub fn unredact(text: &str, mapping_id: &str, vault: &Vault) -> Result<String, R
     let mut restored = String::with_capacity(text.len());
     let mut cursor = 0usize;
 
-    for (start, end, token_name) in &positions {
-        restored.push_str(&text[cursor..*start]);
+    for tok in &positions {
+        restored.push_str(&text[cursor..tok.start]);
 
-        let full_token = format!("<<{token_name}>>");
-        if let Some(original) = mapping.get(&full_token) {
-            restored.push_str(original);
+        if let Some(entry) = record.entries.get(&tok.as_token()) {
+            restored.push_str(&entry.original);
         } else {
-            // Token not in this mapping — leave it verbatim (documented behaviour).
-            restored.push_str(&text[*start..*end]);
+            // Parsed a token shape not in this mapping — leave it verbatim
+            // (documented behaviour; no cross-mapping resolution).
+            restored.push_str(&text[tok.start..tok.end]);
         }
-        cursor = *end;
+        cursor = tok.end;
     }
 
     restored.push_str(&text[cursor..]);
@@ -640,10 +674,9 @@ mod tests {
             redact(text, "default", RedactMode::Reversible, Some(&vault)).unwrap();
         let mid = mid_opt.expect("reversible mode must produce a mapping_id");
 
-        assert!(
-            redacted.contains("<<EMAIL_0>>"),
-            "redacted text must contain the token"
-        );
+        let toks = token::parse_tokens(&redacted);
+        assert_eq!(toks.len(), 1, "one email → one token");
+        assert_eq!(toks[0].label, "Email", "token must carry the Email label");
         assert!(
             !redacted.contains("alice@example.com"),
             "PII must not appear in redacted output"
@@ -660,7 +693,7 @@ mod tests {
     #[test]
     fn unknown_mapping_id_returns_domain_error() {
         let vault = Vault::new();
-        let err = unredact("<<EMAIL_0>>", "map_0000000000000000", &vault)
+        let err = unredact("[Email_deadbeef]", "map_0000000000000000", &vault)
             .expect_err("unknown mapping_id must produce an error");
         assert!(
             matches!(err, RedactError::UnknownMappingId { .. }),
@@ -677,12 +710,12 @@ mod tests {
             redact(text, "default", RedactMode::Reversible, Some(&vault)).unwrap();
         let mid = mid_opt.unwrap();
 
-        // Inject a token that was NOT in the original redacted text.
-        let with_foreign = format!("{redacted} and <<PERSON_0>>");
+        // Inject a valid-grammar token that was NOT in this mapping.
+        let with_foreign = format!("{redacted} and [Person_deadbeef]");
         let restored = unredact(&with_foreign, &mid, &vault).unwrap();
 
         assert!(
-            restored.contains("<<PERSON_0>>"),
+            restored.contains("[Person_deadbeef]"),
             "foreign token must remain verbatim"
         );
         assert!(
@@ -735,7 +768,7 @@ mod tests {
     #[test]
     fn missing_mapping_id_returns_error() {
         let vault = Vault::new();
-        let result = unredact("text with <<EMAIL_0>>", "map_does_not_exist", &vault);
+        let result = unredact("text with [Email_deadbeef]", "map_does_not_exist", &vault);
         match result.expect_err("missing mapping must return an error") {
             RedactError::UnknownMappingId { mapping_id } => {
                 assert_eq!(mapping_id, "map_does_not_exist");
@@ -784,29 +817,66 @@ mod tests {
         );
     }
 
-    // R1 AC: determinism — same input + same profile → identical redacted output.
+    // ADR-0003 cross-call unlinkability: the SAME input in two independent
+    // calls produces DIFFERENT tokens (fresh per-call salt), yet each call's
+    // own mapping restores the original exactly. This is the property ADR-0001
+    // claimed but did not deliver.
     #[test]
-    fn determinism_same_input_same_output() {
+    fn cross_call_tokens_differ_but_each_round_trips() {
         let v1 = Vault::new();
         let v2 = Vault::new();
         let text = "From alice@example.com to bob@example.org.";
-        let (r1, _) = redact(text, "default", RedactMode::Reversible, Some(&v1)).unwrap();
-        let (r2, _) = redact(text, "default", RedactMode::Reversible, Some(&v2)).unwrap();
-        assert_eq!(r1, r2, "same input must produce identical redacted output");
+        let (r1, m1) = redact(text, "default", RedactMode::Reversible, Some(&v1)).unwrap();
+        let (r2, m2) = redact(text, "default", RedactMode::Reversible, Some(&v2)).unwrap();
+
+        assert_ne!(
+            r1, r2,
+            "per-call salt must make the same input redact to different tokens"
+        );
+        assert_eq!(unredact(&r1, &m1.unwrap(), &v1).unwrap(), text);
+        assert_eq!(unredact(&r2, &m2.unwrap(), &v2).unwrap(), text);
     }
 
-    // Multiple emails: indexed as EMAIL_0, EMAIL_1, … and full round-trip.
+    // Two distinct emails in one call get two distinct tokens (both `Email`,
+    // different discriminators), and the whole thing round-trips.
     #[test]
-    fn multiple_emails_indexed_and_round_trip() {
+    fn distinct_values_distinct_tokens_and_round_trip() {
         let vault = Vault::new();
         let text = "From alice@a.com to bob@b.com.";
         let (redacted, mid_opt) =
             redact(text, "pii", RedactMode::Reversible, Some(&vault)).unwrap();
         let mid = mid_opt.unwrap();
-        assert!(redacted.contains("<<EMAIL_0>>"));
-        assert!(redacted.contains("<<EMAIL_1>>"));
-        let restored = unredact(&redacted, &mid, &vault).unwrap();
-        assert_eq!(restored, text);
+
+        let toks = token::parse_tokens(&redacted);
+        assert_eq!(toks.len(), 2, "two emails → two tokens");
+        assert_eq!(toks[0].label, "Email");
+        assert_eq!(toks[1].label, "Email");
+        assert_ne!(
+            toks[0].discriminator, toks[1].discriminator,
+            "different values must get different discriminators"
+        );
+        assert_eq!(unredact(&redacted, &mid, &vault).unwrap(), text);
+    }
+
+    // Same value repeated in one call collapses to one stable token, and all
+    // occurrences restore.
+    #[test]
+    fn repeated_value_shares_one_token() {
+        let vault = Vault::new();
+        let text = "a@x.com then a@x.com again.";
+        let (redacted, mid_opt) =
+            redact(text, "pii", RedactMode::Reversible, Some(&vault)).unwrap();
+        let toks = token::parse_tokens(&redacted);
+        assert_eq!(toks.len(), 2, "two occurrences");
+        assert_eq!(
+            toks[0].as_token(),
+            toks[1].as_token(),
+            "same value → same token within a call"
+        );
+        assert_eq!(
+            unredact(&redacted, &mid_opt.unwrap(), &vault).unwrap(),
+            text
+        );
     }
 
     // Vault id format: "map_{n:016x}".
