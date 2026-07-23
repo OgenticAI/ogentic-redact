@@ -15,20 +15,16 @@ use std::collections::HashMap;
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(redact, m)?)?;
+    m.add_function(wrap_pyfunction!(redact_with_salt, m)?)?;
     m.add_function(wrap_pyfunction!(unredact, m)?)?;
     Ok(())
 }
 
-/// Redact PII in `text`.
-///
-/// Returns a dict ``{"text": str, "tokens": dict[str, str]}`` where ``text``
-/// is the redacted string and ``tokens`` maps each placeholder (e.g.
-/// ``"[EMAIL_1]"``) to the original value it replaced.
-///
-/// Output is byte-identical to the Node.js and Swift bindings for the same input.
-#[pyfunction]
-fn redact<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyDict>> {
-    let result = ogentic_redact_core::redact_one_way(text);
+/// Build the `{"text", "tokens"}` dict from a core result.
+fn result_to_dict<'py>(
+    py: Python<'py>,
+    result: &ogentic_redact_core::RedactOneWayResult,
+) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("text", &result.text)?;
     let tokens_dict = PyDict::new(py);
@@ -37,6 +33,28 @@ fn redact<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyDict>> {
     }
     d.set_item("tokens", tokens_dict)?;
     Ok(d)
+}
+
+/// Redact PII in `text` (ADR-0003 grammar `[Label_<salted-hex>]`).
+///
+/// Returns a dict ``{"text": str, "tokens": dict[str, str]}`` where ``text``
+/// is the redacted string and ``tokens`` maps each placeholder (e.g.
+/// ``"[Email_3f8a2c1b]"``) to the original value it replaced. Uses a fresh
+/// per-call salt; use :func:`redact_with_salt` for reproducible output.
+#[pyfunction]
+fn redact<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyDict>> {
+    result_to_dict(py, &ogentic_redact_core::redact_one_way(text))
+}
+
+/// Like :func:`redact`, but with an explicit ``salt`` (bytes) so the salted-hex
+/// tokens are reproducible. Surfaces sharing the same salt produce byte-identical
+/// output — the basis of the cross-language conformance vectors.
+#[pyfunction]
+fn redact_with_salt<'py>(py: Python<'py>, text: &str, salt: &[u8]) -> PyResult<Bound<'py, PyDict>> {
+    result_to_dict(
+        py,
+        &ogentic_redact_core::redact_one_way_with_salt(text, salt),
+    )
 }
 
 /// Restore redacted placeholders in `text` using `tokens`.

@@ -13,6 +13,7 @@ import XCTest
 // ── JSON model ────────────────────────────────────────────────────────────────
 
 private struct VectorFile: Decodable {
+    let call_salt_hex: String
     let vectors: [Vector]
 }
 
@@ -23,30 +24,43 @@ private struct Vector: Decodable {
     let expected_tokens: [String: String]
 }
 
+private func decodeHex(_ s: String) -> [UInt8] {
+    var bytes: [UInt8] = []
+    var idx = s.startIndex
+    while idx < s.endIndex {
+        let next = s.index(idx, offsetBy: 2)
+        bytes.append(UInt8(s[idx..<next], radix: 16)!)
+        idx = next
+    }
+    return bytes
+}
+
 // ── Test case ─────────────────────────────────────────────────────────────────
 
 final class ConformanceVectorTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func loadVectors() throws -> [Vector] {
+    private func loadFile() throws -> VectorFile {
         guard let url = Bundle.module.url(forResource: "vectors", withExtension: "json") else {
             XCTFail("vectors.json not found in test bundle")
-            return []
+            return VectorFile(call_salt_hex: "", vectors: [])
         }
         let data = try Data(contentsOf: url)
         let file = try JSONDecoder().decode(VectorFile.self, from: data)
         XCTAssertFalse(file.vectors.isEmpty, "vectors.json must contain at least one vector")
-        return file.vectors
+        XCTAssertFalse(file.call_salt_hex.isEmpty, "vectors.json must carry a fixed call_salt_hex")
+        return file
     }
 
     // MARK: - Conformance
 
-    func testF3VectorsSwiftSurface() throws {
-        let vectors = try loadVectors()
+    func testF4VectorsSwiftSurface() throws {
+        let file = try loadFile()
+        let salt = decodeHex(file.call_salt_hex)
 
-        for v in vectors {
-            let result = try OgenticRedact.redact(v.input)
+        for v in file.vectors {
+            let result = try OgenticRedact.redact(v.input, salt: salt)
 
             XCTAssertEqual(
                 result.text,
@@ -57,6 +71,14 @@ final class ConformanceVectorTests: XCTestCase {
                 result.tokenMap,
                 v.expected_tokens,
                 "[\(v.id)] tokens mismatch — input: \(v.input.debugDescription)"
+            )
+
+            // Round-trip (ADR-0003 §9).
+            let restored = try OgenticRedact.unredact(result.text, using: result.tokenMap)
+            XCTAssertEqual(
+                restored,
+                v.input,
+                "[\(v.id)] round-trip mismatch — input: \(v.input.debugDescription)"
             )
         }
     }

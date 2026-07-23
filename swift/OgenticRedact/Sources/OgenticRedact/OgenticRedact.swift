@@ -105,6 +105,28 @@ public enum OgenticRedact {
         }
     }
 
+    /// Redact PII in `text` using an explicit `salt`, so the salted-hex tokens
+    /// are reproducible. Surfaces sharing the same salt bytes produce
+    /// byte-identical output — the basis of the cross-language conformance
+    /// vectors.
+    ///
+    /// - Parameters:
+    ///   - text: Plain UTF-8 text that may contain PII.
+    ///   - salt: The salt bytes (any length; may be empty).
+    /// - Returns: A ``RedactedText`` with the scrubbed text and token map.
+    /// - Throws: ``OgenticRedactError`` on library error or JSON decode failure.
+    public static func redact(_ text: String, salt: [UInt8]) throws -> RedactedText {
+        try text.withUTF8Bytes { ptr, len in
+            var outLen: Int = 0
+            let raw: UnsafeMutablePointer<UInt8>? = salt.withUnsafeBufferPointer { saltBuf in
+                ogentic_redact_with_salt(ptr, len, saltBuf.baseAddress, saltBuf.count, &outLen)
+            }
+            guard let raw else { throw OgenticRedactError.libraryError }
+            defer { ogentic_redact_free(raw, outLen) }
+            return try decodePayload(raw, length: outLen)
+        }
+    }
+
     /// Restore redacted placeholders in `text` using `tokenMap`.
     ///
     /// - Parameters:

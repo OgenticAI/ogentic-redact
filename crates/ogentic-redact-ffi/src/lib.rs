@@ -7,11 +7,9 @@
 //! # Stub notice
 //!
 //! The detection engine (REDACT-R6) has not landed yet.  This implementation
-//! uses simple regex-free pattern matching (email, US-phone, SSN) as a
-//! placeholder so the Swift binding and the F3 golden-vector tests can be
-//! written and verified against a real, callable ABI.  Once REDACT-R6 ships,
-//! the body of `redact_core` is replaced by a call into `ogentic-redact-core`
-//! with no ABI change.
+//! Detection routes through `ogentic-redact-core`; this crate is a thin C-ABI
+//! shim that marshals bytes and JSON. The built-in byte-scanner is a documented
+//! dev convenience (ADR-0002) — production spans come from Shield (OGE-1230).
 //!
 //! # Safety contract
 //!
@@ -48,218 +46,6 @@ fn vec_to_raw(mut v: Vec<u8>) -> (*mut u8, usize) {
     (ptr, len)
 }
 
-// ─── stub detection logic ─────────────────────────────────────────────────────
-
-/// Scan `text` for recognisable PII patterns and replace each occurrence with
-/// a placeholder token.  Returns `(redacted_text, token_map)`.
-///
-/// Patterns (stub, replaced by REDACT-R6 engine when it lands):
-///   - Email: `word@word.tld`
-///   - US phone: `(NXX) NXX-XXXX` and `NXX-NXX-XXXX` and `+1XXXXXXXXXX`
-///   - SSN:   `DDD-DD-DDDD`
-fn redact_core(text: &str) -> (String, HashMap<String, String>) {
-    let mut out = String::with_capacity(text.len());
-    let mut tokens: HashMap<String, String> = HashMap::new();
-    let mut email_n = 0u32;
-    let mut phone_n = 0u32;
-    let mut ssn_n = 0u32;
-
-    let bytes = text.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-
-    while i < len {
-        // Try to match an email: word @ word . tld
-        if let Some((email, end)) = try_match_email(bytes, i) {
-            email_n += 1;
-            let placeholder = format!("[EMAIL_{email_n}]");
-            tokens.insert(placeholder.clone(), email);
-            out.push_str(&placeholder);
-            i = end;
-            continue;
-        }
-
-        // Try to match an SSN before phone (SSN is digits-digits-digits)
-        if let Some((ssn, end)) = try_match_ssn(bytes, i) {
-            ssn_n += 1;
-            let placeholder = format!("[SSN_{ssn_n}]");
-            tokens.insert(placeholder.clone(), ssn);
-            out.push_str(&placeholder);
-            i = end;
-            continue;
-        }
-
-        // Try to match a US phone number
-        if let Some((phone, end)) = try_match_phone(bytes, i) {
-            phone_n += 1;
-            let placeholder = format!("[PHONE_{phone_n}]");
-            tokens.insert(placeholder.clone(), phone);
-            out.push_str(&placeholder);
-            i = end;
-            continue;
-        }
-
-        // Plain character — pass through
-        // SAFETY: `bytes[i]` is a valid index; we reconstruct chars properly
-        let ch = char::from(bytes[i]);
-        if ch.is_ascii() {
-            out.push(ch);
-            i += 1;
-        } else {
-            // Decode a multi-byte UTF-8 sequence without indexing the middle bytes
-            let tail = &text[i..];
-            let c = tail.chars().next().unwrap();
-            out.push(c);
-            i += c.len_utf8();
-        }
-    }
-
-    (out, tokens)
-}
-
-// ── pattern matchers (byte-level, no regex dependency) ────────────────────────
-
-/// Match `word@word.tld` starting at `pos`.
-/// Returns `(matched_str, end_pos)` or `None`.
-fn try_match_email(b: &[u8], pos: usize) -> Option<(String, usize)> {
-    // local-part: [a-zA-Z0-9._+-]+
-    let mut i = pos;
-    if i >= b.len() || !is_email_local(b[i]) {
-        return None;
-    }
-    while i < b.len() && is_email_local(b[i]) {
-        i += 1;
-    }
-    if i >= b.len() || b[i] != b'@' {
-        return None;
-    }
-    let at = i;
-    i += 1; // skip @
-            // domain label
-    if i >= b.len() || !b[i].is_ascii_alphanumeric() {
-        return None;
-    }
-    while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'.' || b[i] == b'-') {
-        i += 1;
-    }
-    // Trim any trailing dots (e.g. `user@example.com.` at sentence end).
-    // An email address cannot end with a dot.
-    while i > at + 1 && b[i - 1] == b'.' {
-        i -= 1;
-    }
-    // must have a dot somewhere after @
-    let domain_slice = &b[at + 1..i];
-    if !domain_slice.contains(&b'.') {
-        return None;
-    }
-    // Ensure local-part started at a word boundary (not mid-word replacement)
-    if pos > 0 && is_email_local(b[pos - 1]) {
-        return None;
-    }
-    let matched = std::str::from_utf8(&b[pos..i]).ok()?.to_owned();
-    Some((matched, i))
-}
-
-fn is_email_local(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'+' | b'-')
-}
-
-/// Match SSN `DDD-DD-DDDD` starting at `pos`.
-fn try_match_ssn(b: &[u8], pos: usize) -> Option<(String, usize)> {
-    if pos + 11 > b.len() {
-        return None;
-    }
-    // Boundary: not preceded by a digit
-    if pos > 0 && b[pos - 1].is_ascii_digit() {
-        return None;
-    }
-    let s = &b[pos..pos + 11];
-    let ok = s[0].is_ascii_digit()
-        && s[1].is_ascii_digit()
-        && s[2].is_ascii_digit()
-        && s[3] == b'-'
-        && s[4].is_ascii_digit()
-        && s[5].is_ascii_digit()
-        && s[6] == b'-'
-        && s[7].is_ascii_digit()
-        && s[8].is_ascii_digit()
-        && s[9].is_ascii_digit()
-        && s[10].is_ascii_digit();
-    if !ok {
-        return None;
-    }
-    // Ensure not followed by a digit (e.g. SSN embedded in longer number)
-    if pos + 11 < b.len() && b[pos + 11].is_ascii_digit() {
-        return None;
-    }
-    let matched = std::str::from_utf8(s).ok()?.to_owned();
-    Some((matched, pos + 11))
-}
-
-/// Match US phone starting at `pos`.  Formats supported:
-///   `(NXX) NXX-XXXX`  →  16 chars
-///   `NXX-NXX-XXXX`    →  12 chars
-///   `+1-NXX-NXX-XXXX` →  15 chars
-fn try_match_phone(b: &[u8], pos: usize) -> Option<(String, usize)> {
-    // Boundary: not preceded by digit or letter
-    if pos > 0 && (b[pos - 1].is_ascii_alphanumeric() || b[pos - 1] == b'.') {
-        return None;
-    }
-
-    let rest = &b[pos..];
-
-    // +1-NXX-NXX-XXXX
-    if rest.starts_with(b"+1") && rest.len() >= 15 {
-        let candidate = &rest[..15];
-        if candidate[2] == b'-'
-            && all_digits(&candidate[3..6])
-            && candidate[6] == b'-'
-            && all_digits(&candidate[7..10])
-            && candidate[10] == b'-'
-            && all_digits(&candidate[11..15])
-        {
-            let matched = std::str::from_utf8(candidate).ok()?.to_owned();
-            return Some((matched, pos + 15));
-        }
-    }
-
-    // (NXX) NXX-XXXX
-    if rest.len() >= 14 && rest[0] == b'(' {
-        let candidate = &rest[..14];
-        if all_digits(&candidate[1..4])
-            && candidate[4] == b')'
-            && candidate[5] == b' '
-            && all_digits(&candidate[6..9])
-            && candidate[9] == b'-'
-            && all_digits(&candidate[10..14])
-        {
-            let matched = std::str::from_utf8(candidate).ok()?.to_owned();
-            return Some((matched, pos + 14));
-        }
-    }
-
-    // NXX-NXX-XXXX
-    if rest.len() >= 12 {
-        let candidate = &rest[..12];
-        if all_digits(&candidate[0..3])
-            && candidate[3] == b'-'
-            && all_digits(&candidate[4..7])
-            && candidate[7] == b'-'
-            && all_digits(&candidate[8..12])
-        {
-            // Boundary: not preceded by digit
-            let matched = std::str::from_utf8(candidate).ok()?.to_owned();
-            return Some((matched, pos + 12));
-        }
-    }
-
-    None
-}
-
-fn all_digits(s: &[u8]) -> bool {
-    s.iter().all(|b| b.is_ascii_digit())
-}
-
 // ─── public C API ─────────────────────────────────────────────────────────────
 
 /// Free a buffer previously returned by `ogentic_redact` or `ogentic_unredact`.
@@ -287,19 +73,35 @@ pub extern "C" fn ogentic_redact_version() -> *const std::os::raw::c_char {
     VERSION.as_ptr()
 }
 
-/// Redact PII in `input`.
+/// Serialise a [`RedactOneWayResult`] to the `{"text":…,"tokens":…}` JSON buffer
+/// the C ABI returns, or `null` on serialisation failure.
+fn result_to_raw(result: &ogentic_redact_core::RedactOneWayResult, out_len: *mut usize) -> *mut u8 {
+    let payload = match serde_json::to_vec(&serde_json::json!({
+        "text": result.text,
+        "tokens": result.tokens,
+    })) {
+        Ok(v) => v,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let len = payload.len();
+    let (ptr, _) = vec_to_raw(payload);
+    unsafe { *out_len = len };
+    ptr
+}
+
+/// Redact PII in `input` (ADR-0003 grammar, `[Label_<salted-hex>]`).
+///
+/// Uses a fresh per-call salt, so the same value redacts differently across
+/// calls. For reproducible output (e.g. conformance) use
+/// [`ogentic_redact_with_salt`]. Detection routes through `ogentic-redact-core`.
 ///
 /// Returns a heap-allocated JSON byte string of the form:
 /// ```json
-/// {"text":"…","tokens":{"[EMAIL_1]":"alice@example.com"}}
+/// {"text":"…","tokens":{"[Email_3f8a2c1b]":"alice@example.com"}}
 /// ```
-/// Sets `*out_len` to the byte length of the returned buffer (excluding any
-/// null terminator — the buffer is NOT null-terminated).
-///
-/// Returns `null` on error (invalid UTF-8 input, OOM).  If `null` is returned,
-/// `*out_len` is set to `0`.
-///
-/// The caller must free the returned buffer with `ogentic_redact_free`.
+/// Sets `*out_len` to the byte length of the returned buffer (NOT
+/// null-terminated). Returns `null` on error (invalid UTF-8, OOM), with
+/// `*out_len` set to `0`. The caller must free it with `ogentic_redact_free`.
 ///
 /// # Safety
 /// - `input` must point to `input_len` valid bytes.
@@ -311,26 +113,45 @@ pub unsafe extern "C" fn ogentic_redact(
     out_len: *mut usize,
 ) -> *mut u8 {
     unsafe { *out_len = 0 };
-
     let text = match unsafe { bytes_to_str(input, input_len) } {
         Some(s) => s,
         None => return std::ptr::null_mut(),
     };
+    result_to_raw(&ogentic_redact_core::redact_one_way(text), out_len)
+}
 
-    let (redacted, tokens) = redact_core(text);
-
-    let payload = match serde_json::to_vec(&serde_json::json!({
-        "text": redacted,
-        "tokens": tokens,
-    })) {
-        Ok(v) => v,
-        Err(_) => return std::ptr::null_mut(),
+/// [`ogentic_redact`] with an explicit `salt`, so output is reproducible.
+///
+/// All surfaces that share the fixed `salt` bytes produce byte-identical
+/// output — this is how the F3 conformance vectors stay deterministic across
+/// languages.
+///
+/// # Safety
+/// - `input` must point to `input_len` valid bytes.
+/// - `salt` must point to `salt_len` valid bytes (may be empty / any length).
+/// - `out_len` must be a valid, non-null pointer.
+#[no_mangle]
+pub unsafe extern "C" fn ogentic_redact_with_salt(
+    input: *const u8,
+    input_len: usize,
+    salt: *const u8,
+    salt_len: usize,
+    out_len: *mut usize,
+) -> *mut u8 {
+    unsafe { *out_len = 0 };
+    let text = match unsafe { bytes_to_str(input, input_len) } {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
     };
-
-    let len = payload.len();
-    let (ptr, _) = vec_to_raw(payload);
-    unsafe { *out_len = len };
-    ptr
+    let salt_bytes: &[u8] = if salt.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(salt, salt_len) }
+    };
+    result_to_raw(
+        &ogentic_redact_core::redact_one_way_with_salt(text, salt_bytes),
+        out_len,
+    )
 }
 
 /// Restore redacted placeholders in `input` using `token_map_json`.
@@ -371,10 +192,8 @@ pub unsafe extern "C" fn ogentic_unredact(
         Err(_) => return std::ptr::null_mut(),
     };
 
-    let mut result = text.to_owned();
-    for (placeholder, original) in &map {
-        result = result.replace(placeholder.as_str(), original.as_str());
-    }
+    // Scan-and-lookup via core (ADR-0003 §7), not a blind substring replace.
+    let result = ogentic_redact_core::unredact_one_way(text, &map);
 
     let bytes = result.into_bytes();
     let len = bytes.len();
@@ -419,7 +238,8 @@ pub unsafe extern "C" fn ogentic_redact_stream_open(
 
     // Redact the full text first so that sentence splitting does not fragment
     // PII tokens (e.g. splitting on the dot inside `alice@example.com`).
-    let (redacted_full, all_tokens) = redact_core(text);
+    let full = ogentic_redact_core::redact_one_way(text);
+    let (redacted_full, all_tokens) = (full.text, full.tokens);
 
     // Split the *redacted* text on sentence-ending punctuation.
     let mut chunks: Vec<Vec<u8>> = Vec::new();
@@ -521,63 +341,91 @@ pub unsafe extern "C" fn ogentic_redact_stream_close(handle: *mut OgenticRedactS
 mod tests {
     use super::*;
 
-    #[test]
-    fn email_detected() {
-        let (out, tokens) = redact_core("Contact alice@example.com for info.");
-        assert!(out.contains("[EMAIL_1]"), "email not redacted: {out}");
-        assert_eq!(
-            tokens.get("[EMAIL_1]").map(|s| s.as_str()),
-            Some("alice@example.com")
-        );
-        assert!(!out.contains("alice@example.com"));
+    /// Call the C ABI `ogentic_redact` and parse its JSON buffer.
+    fn call_redact(text: &str) -> (String, HashMap<String, String>) {
+        let mut out_len = 0usize;
+        let ptr = unsafe { ogentic_redact(text.as_ptr(), text.len(), &mut out_len) };
+        assert!(!ptr.is_null(), "ogentic_redact returned null");
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, out_len) };
+        let json: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        let out = json["text"].as_str().unwrap().to_owned();
+        let tokens: HashMap<String, String> =
+            serde_json::from_value(json["tokens"].clone()).unwrap();
+        unsafe { ogentic_redact_free(ptr, out_len) };
+        (out, tokens)
+    }
+
+    /// Call the C ABI `ogentic_unredact` and return the restored string.
+    fn call_unredact(text: &str, tokens: &HashMap<String, String>) -> String {
+        let map_json = serde_json::to_vec(tokens).unwrap();
+        let mut out_len = 0usize;
+        let ptr = unsafe {
+            ogentic_unredact(
+                text.as_ptr(),
+                text.len(),
+                map_json.as_ptr(),
+                map_json.len(),
+                &mut out_len,
+            )
+        };
+        assert!(!ptr.is_null(), "ogentic_unredact returned null");
+        let restored =
+            String::from_utf8(unsafe { std::slice::from_raw_parts(ptr, out_len) }.to_vec())
+                .unwrap();
+        unsafe { ogentic_redact_free(ptr, out_len) };
+        restored
     }
 
     #[test]
-    fn phone_dash_format() {
-        let (out, tokens) = redact_core("Call 555-867-5309 now.");
-        assert!(out.contains("[PHONE_1]"), "phone not redacted: {out}");
-        assert_eq!(
-            tokens.get("[PHONE_1]").map(|s| s.as_str()),
-            Some("555-867-5309")
+    fn c_abi_redact_emits_adr0003_grammar() {
+        let (out, tokens) = call_redact("Contact alice@example.com for info.");
+        assert!(!out.contains("alice@example.com"), "PII leaked: {out}");
+        assert_eq!(tokens.len(), 1);
+        let (tok, orig) = tokens.iter().next().unwrap();
+        assert_eq!(orig, "alice@example.com");
+        // New grammar: [Email_<8 lower-hex>].
+        assert!(
+            tok.starts_with("[Email_") && tok.ends_with(']'),
+            "grammar: {tok}"
         );
+        assert!(out.contains(tok));
     }
 
     #[test]
-    fn phone_parens_format() {
-        let (out, tokens) = redact_core("Reach me at (415) 555-0100.");
-        assert!(out.contains("[PHONE_1]"), "phone not redacted: {out}");
-        assert_eq!(
-            tokens.get("[PHONE_1]").map(|s| s.as_str()),
-            Some("(415) 555-0100")
-        );
-    }
-
-    #[test]
-    fn ssn_detected() {
-        let (out, tokens) = redact_core("SSN: 123-45-6789.");
-        assert!(out.contains("[SSN_1]"), "SSN not redacted: {out}");
-        assert_eq!(
-            tokens.get("[SSN_1]").map(|s| s.as_str()),
-            Some("123-45-6789")
-        );
-    }
-
-    #[test]
-    fn unredact_round_trip() {
+    fn c_abi_round_trip() {
         let original = "Email bob@acme.org for the invoice.";
-        let (redacted, tokens) = redact_core(original);
+        let (redacted, tokens) = call_redact(original);
         assert!(!redacted.contains("bob@acme.org"));
-        let mut restored = redacted.clone();
-        for (k, v) in &tokens {
-            restored = restored.replace(k.as_str(), v.as_str());
-        }
-        assert_eq!(restored, original);
+        assert_eq!(call_unredact(&redacted, &tokens), original);
     }
 
     #[test]
-    fn no_false_positives_on_plain_text() {
+    fn c_abi_with_salt_is_reproducible() {
+        // Same salt via the salted entry point → byte-identical output.
+        let text = "ping a@b.com";
+        let salt: [u8; 4] = [1, 2, 3, 4];
+        let run = || {
+            let mut n = 0usize;
+            let p = unsafe {
+                ogentic_redact_with_salt(
+                    text.as_ptr(),
+                    text.len(),
+                    salt.as_ptr(),
+                    salt.len(),
+                    &mut n,
+                )
+            };
+            let v = unsafe { std::slice::from_raw_parts(p, n) }.to_vec();
+            unsafe { ogentic_redact_free(p, n) };
+            String::from_utf8(v).unwrap()
+        };
+        assert_eq!(run(), run(), "same salt must give identical bytes");
+    }
+
+    #[test]
+    fn c_abi_no_false_positives_on_plain_text() {
         let text = "The quick brown fox jumps over the lazy dog.";
-        let (out, tokens) = redact_core(text);
+        let (out, tokens) = call_redact(text);
         assert_eq!(out, text);
         assert!(tokens.is_empty());
     }

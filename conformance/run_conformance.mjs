@@ -24,12 +24,17 @@ const repoRoot = resolve(__dirname, '..');
 // ── Load vectors ──────────────────────────────────────────────────────────────
 
 const vectorsPath = resolve(repoRoot, 'conformance', 'vectors.json');
-const { vectors } = JSON.parse(readFileSync(vectorsPath, 'utf-8'));
+const { vectors, call_salt_hex } = JSON.parse(readFileSync(vectorsPath, 'utf-8'));
 
 if (!vectors || vectors.length === 0) {
   console.error('vectors.json must contain at least one vector');
   process.exit(1);
 }
+if (!call_salt_hex) {
+  console.error('vectors.json must carry a fixed call_salt_hex');
+  process.exit(1);
+}
+const salt = Buffer.from(call_salt_hex, 'hex');
 
 // ── Load the napi-rs binding ──────────────────────────────────────────────────
 
@@ -59,7 +64,7 @@ try {
   process.exit(0); // skip, not fail, when the addon is not yet built
 }
 
-const { redact } = binding;
+const { redactWithSalt, unredact } = binding;
 
 // ── Run vectors ───────────────────────────────────────────────────────────────
 
@@ -67,12 +72,14 @@ let passed = 0;
 let failed = 0;
 
 for (const v of vectors) {
-  const result = redact(v.input);
+  const result = redactWithSalt(v.input, salt);
 
   const textOk = result.text === v.expected_text;
   const tokensOk = JSON.stringify(sortedObj(result.tokens)) === JSON.stringify(sortedObj(v.expected_tokens));
+  const restored = unredact(result.text, result.tokens);
+  const roundTripOk = restored === v.input;
 
-  if (textOk && tokensOk) {
+  if (textOk && tokensOk && roundTripOk) {
     console.log(`  ✓  ${v.id}`);
     passed++;
   } else {
@@ -82,6 +89,9 @@ for (const v of vectors) {
     }
     if (!tokensOk) {
       console.error(`       tokens\n         got:      ${JSON.stringify(result.tokens)}\n         expected: ${JSON.stringify(v.expected_tokens)}`);
+    }
+    if (!roundTripOk) {
+      console.error(`       round-trip\n         got:      ${JSON.stringify(restored)}\n         expected: ${JSON.stringify(v.input)}`);
     }
     failed++;
   }
