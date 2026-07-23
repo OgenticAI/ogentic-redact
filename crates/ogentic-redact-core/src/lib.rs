@@ -276,55 +276,57 @@ fn assign_tokens<'a>(
 ) -> (Vec<(&'a Span, String)>, HashMap<String, VaultEntry>) {
     let mut per_span: Vec<(&Span, String)> = Vec::with_capacity(spans.len());
     let mut entries: HashMap<String, VaultEntry> = HashMap::new();
-    // (label, canonical) -> token, for within-call stability.
-    let mut seen: HashMap<(String, String), String> = HashMap::new();
+    let mut assigner = TokenAssigner::default();
 
     for span in spans {
         let original = &text[span.start..span.end];
         let label = token::label_for(&span.entity_type);
         let canonical = token::canonicalize(original);
-        let key = (label.clone(), canonical.clone());
-
-        let tok = if let Some(existing) = seen.get(&key) {
-            existing.clone()
-        } else {
-            let tok = unique_token(&label, &canonical, call_salt, &entries);
-            seen.insert(key, tok.clone());
-            entries.insert(
-                tok.clone(),
-                VaultEntry {
-                    original: original.to_owned(),
-                    label: label.clone(),
-                    canonical,
-                },
-            );
-            tok
-        };
+        let tok = assigner.assign(&label, &canonical, call_salt);
+        entries.entry(tok.clone()).or_insert_with(|| VaultEntry {
+            original: original.to_owned(),
+            label,
+            canonical,
+        });
         per_span.push((span, tok));
     }
 
     (per_span, entries)
 }
 
-/// Build a token for `(label, canonical)`, extending the discriminator if the
-/// default 8-hex form already names a *different* original in `entries`.
-fn unique_token(
-    label: &str,
-    canonical: &str,
-    call_salt: &[u8; token::SALT_LEN],
-    entries: &HashMap<String, VaultEntry>,
-) -> String {
-    let short = token::discriminator(call_salt, label, canonical);
-    let candidate = token::emit(label, &short);
-    match entries.get(&candidate) {
-        // Free, or already ours (can't happen here — `seen` caught it) → use it.
-        None => candidate,
-        Some(e) if e.canonical == canonical => candidate,
-        // Genuine collision: two different values, same 8-hex. Extend to 12.
-        Some(_) => {
-            let full = token::full_discriminator(call_salt, label, canonical);
-            token::emit(label, &full[..token::DISCRIMINATOR_LEN_EXTENDED])
-        },
+/// Assigns `[Label_<salted-hex>]` tokens within a single call, guaranteeing
+/// within-call stability (same `(label, canonical)` → same token) and
+/// resolving discriminator collisions by extending to a longer hex
+/// (ADR-0003 §4). Shared by the reversible ([`assign_tokens`]) and one-way
+/// ([`redact_one_way_inner`]) paths.
+#[derive(Default)]
+struct TokenAssigner {
+    /// (label, canonical) → token, for stability.
+    seen: HashMap<(String, String), String>,
+    /// token → canonical, for collision detection.
+    token_canon: HashMap<String, String>,
+}
+
+impl TokenAssigner {
+    fn assign(&mut self, label: &str, canonical: &str, call_salt: &[u8]) -> String {
+        let key = (label.to_owned(), canonical.to_owned());
+        if let Some(existing) = self.seen.get(&key) {
+            return existing.clone();
+        }
+        let short = token::discriminator(call_salt, label, canonical);
+        let candidate = token::emit(label, &short);
+        let tok = match self.token_canon.get(&candidate) {
+            None => candidate,
+            Some(c) if c == canonical => candidate,
+            // Genuine collision: two different values, same 8-hex → extend to 12.
+            Some(_) => {
+                let full = token::full_discriminator(call_salt, label, canonical);
+                token::emit(label, &full[..token::DISCRIMINATOR_LEN_EXTENDED])
+            },
+        };
+        self.seen.insert(key, tok.clone());
+        self.token_canon.insert(tok.clone(), canonical.to_owned());
+        tok
     }
 }
 
@@ -455,9 +457,9 @@ pub fn unredact(text: &str, mapping_id: &str, vault: &Vault) -> Result<String, R
 /// byte-identical output when driven by the same input.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RedactOneWayResult {
-    /// Redacted text, e.g. `"Contact [EMAIL_1] at [PHONE_1]."`.
+    /// Redacted text, e.g. `"Contact [Email_3f8a2c1b] at [Phone_9be10422]."`.
     pub text: String,
-    /// Token→original map, e.g. `{"[EMAIL_1]": "alice@example.com"}`.
+    /// Token→original map, e.g. `{"[Email_3f8a2c1b]": "alice@example.com"}`.
     pub tokens: HashMap<String, String>,
 }
 
@@ -475,11 +477,25 @@ impl RedactOneWayResult {
 /// FFI) delegate to this implementation and must produce byte-identical output
 /// for the same input.
 ///
-/// Token format: `[EMAIL_N]`, `[PHONE_N]`, `[SSN_N]` (1-indexed, left-to-right).
+/// Token format: `[Label_<salted-hex>]` (ADR-0003), e.g. `[Email_3f8a2c1b]`.
+/// A fresh per-call salt makes the same value redact differently across calls;
+/// use [`redact_one_way_with_salt`] to supply a fixed salt (conformance / tests).
 ///
 /// Detected patterns: email address, US phone number, US Social Security Number.
+/// (Detection is a documented dev convenience — production spans come from
+/// Shield, per ADR-0002.)
 pub fn redact_one_way(text: &str) -> RedactOneWayResult {
-    let (out_text, tokens) = redact_one_way_inner(text);
+    let call_salt: [u8; token::SALT_LEN] = rand::random();
+    redact_one_way_with_salt(text, &call_salt)
+}
+
+/// [`redact_one_way`] with an explicit `call_salt`, so output is reproducible.
+///
+/// The salt need not be [`token::SALT_LEN`] bytes — HMAC accepts any key — but
+/// callers that want cross-surface byte-identity must agree on the exact bytes
+/// (this is how the F3 conformance vectors stay deterministic).
+pub fn redact_one_way_with_salt(text: &str, call_salt: &[u8]) -> RedactOneWayResult {
+    let (out_text, tokens) = redact_one_way_inner(text, call_salt);
     RedactOneWayResult {
         text: out_text,
         tokens,
@@ -488,52 +504,57 @@ pub fn redact_one_way(text: &str) -> RedactOneWayResult {
 
 /// Restore redacted placeholders using the token map from a prior
 /// [`redact_one_way`] call.
+///
+/// Scans for `[Label_<hex>]` tokens and replaces each by exact map lookup
+/// (ADR-0003 §7) — never a blind substring replace, so one token's bytes being
+/// a substring of another's cannot cause a double substitution.
 pub fn unredact_one_way(redacted: &str, tokens: &HashMap<String, String>) -> String {
-    let mut result = redacted.to_owned();
-    for (placeholder, original) in tokens {
-        result = result.replace(placeholder.as_str(), original.as_str());
+    let positions = token::parse_tokens(redacted);
+    if positions.is_empty() {
+        return redacted.to_owned();
     }
-    result
+    let mut out = String::with_capacity(redacted.len());
+    let mut cursor = 0usize;
+    for tok in &positions {
+        out.push_str(&redacted[cursor..tok.start]);
+        match tokens.get(&tok.as_token()) {
+            Some(original) => out.push_str(original),
+            None => out.push_str(&redacted[tok.start..tok.end]),
+        }
+        cursor = tok.end;
+    }
+    out.push_str(&redacted[cursor..]);
+    out
 }
 
 // ── Internal: byte-level pattern matching ─────────────────────────────────────
 
-fn redact_one_way_inner(text: &str) -> (String, HashMap<String, String>) {
+fn redact_one_way_inner(text: &str, call_salt: &[u8]) -> (String, HashMap<String, String>) {
     let mut out = String::with_capacity(text.len());
     let mut token_map: HashMap<String, String> = HashMap::new();
-    let mut email_n: u32 = 0;
-    let mut phone_n: u32 = 0;
-    let mut ssn_n: u32 = 0;
+    let mut assigner = TokenAssigner::default();
 
     let bytes = text.as_bytes();
     let len = bytes.len();
     let mut i = 0;
 
     while i < len {
-        if let Some((matched, end)) = match_email(bytes, i) {
-            email_n += 1;
-            let tok = format!("[EMAIL_{email_n}]");
-            token_map.insert(tok.clone(), matched);
+        // Detection order is significant: email, then SSN, then phone.
+        let hit = match_email(bytes, i)
+            .map(|(m, e)| ("EMAIL", m, e))
+            .or_else(|| match_ssn(bytes, i).map(|(m, e)| ("SSN", m, e)))
+            .or_else(|| match_phone(bytes, i).map(|(m, e)| ("PHONE", m, e)));
+
+        if let Some((entity_type, matched, end)) = hit {
+            let label = token::label_for(entity_type);
+            let canonical = token::canonicalize(&matched);
+            let tok = assigner.assign(&label, &canonical, call_salt);
+            token_map.entry(tok.clone()).or_insert(matched);
             out.push_str(&tok);
             i = end;
             continue;
         }
-        if let Some((matched, end)) = match_ssn(bytes, i) {
-            ssn_n += 1;
-            let tok = format!("[SSN_{ssn_n}]");
-            token_map.insert(tok.clone(), matched);
-            out.push_str(&tok);
-            i = end;
-            continue;
-        }
-        if let Some((matched, end)) = match_phone(bytes, i) {
-            phone_n += 1;
-            let tok = format!("[PHONE_{phone_n}]");
-            token_map.insert(tok.clone(), matched);
-            out.push_str(&tok);
-            i = end;
-            continue;
-        }
+
         // Pass through, preserving multi-byte UTF-8 sequences.
         if bytes[i].is_ascii() {
             out.push(char::from(bytes[i]));
@@ -889,27 +910,38 @@ mod tests {
         assert_eq!(mid1.unwrap(), "map_0000000000000001");
     }
 
-    // F3 conformance: redact_one_way produces [EMAIL_N] tokens.
+    // The fixed salt used by the F3 conformance vectors (matches vectors.json).
+    const TEST_SALT: [u8; token::SALT_LEN] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f,
+    ];
+
     #[test]
     fn one_way_email_token() {
-        let r = redact_one_way("Contact alice@example.com for details.");
-        assert_eq!(r.text, "Contact [EMAIL_1] for details.");
-        assert_eq!(r.tokens["[EMAIL_1]"], "alice@example.com");
-        assert!(r.tokens.len() == 1);
+        let r = redact_one_way_with_salt("Contact alice@example.com for details.", &TEST_SALT);
+        let toks = token::parse_tokens(&r.text);
+        assert_eq!(toks.len(), 1);
+        assert_eq!(toks[0].label, "Email");
+        assert_eq!(r.tokens.len(), 1);
+        assert_eq!(r.tokens[&toks[0].as_token()], "alice@example.com");
     }
 
     #[test]
     fn one_way_phone_dash() {
-        let r = redact_one_way("Call 555-867-5309 for support.");
-        assert_eq!(r.text, "Call [PHONE_1] for support.");
-        assert_eq!(r.tokens["[PHONE_1]"], "555-867-5309");
+        let r = redact_one_way_with_salt("Call 555-867-5309 for support.", &TEST_SALT);
+        let toks = token::parse_tokens(&r.text);
+        assert_eq!(toks.len(), 1);
+        assert_eq!(toks[0].label, "Phone");
+        assert_eq!(r.tokens[&toks[0].as_token()], "555-867-5309");
     }
 
     #[test]
     fn one_way_ssn() {
-        let r = redact_one_way("Patient SSN is 123-45-6789.");
-        assert_eq!(r.text, "Patient SSN is [SSN_1].");
-        assert_eq!(r.tokens["[SSN_1]"], "123-45-6789");
+        let r = redact_one_way_with_salt("Patient SSN is 123-45-6789.", &TEST_SALT);
+        let toks = token::parse_tokens(&r.text);
+        assert_eq!(toks.len(), 1);
+        assert_eq!(toks[0].label, "Ssn");
+        assert_eq!(r.tokens[&toks[0].as_token()], "123-45-6789");
     }
 
     #[test]
@@ -926,5 +958,37 @@ mod tests {
         let r = redact_one_way(input);
         let restored = unredact_one_way(&r.text, &r.tokens);
         assert_eq!(restored, input);
+    }
+
+    #[test]
+    fn one_way_fixed_salt_is_reproducible() {
+        // Same salt → identical bytes (the property the conformance vectors need).
+        let a = redact_one_way_with_salt("mail me at a@b.com", &TEST_SALT);
+        let b = redact_one_way_with_salt("mail me at a@b.com", &TEST_SALT);
+        assert_eq!(a.text, b.text);
+        assert_eq!(a.tokens, b.tokens);
+    }
+
+    #[test]
+    fn one_way_random_salt_is_unlinkable() {
+        // Default (random) salt → different tokens across calls, each restoring.
+        let input = "mail me at a@b.com";
+        let a = redact_one_way(input);
+        let b = redact_one_way(input);
+        assert_ne!(
+            a.text, b.text,
+            "random salt must vary the token across calls"
+        );
+        assert_eq!(unredact_one_way(&a.text, &a.tokens), input);
+        assert_eq!(unredact_one_way(&b.text, &b.tokens), input);
+    }
+
+    #[test]
+    fn one_way_repeated_value_shares_token() {
+        let r = redact_one_way_with_salt("a@b.com and again a@b.com", &TEST_SALT);
+        let toks = token::parse_tokens(&r.text);
+        assert_eq!(toks.len(), 2);
+        assert_eq!(toks[0].as_token(), toks[1].as_token());
+        assert_eq!(r.tokens.len(), 1, "same value → one entry");
     }
 }
