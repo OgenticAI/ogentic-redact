@@ -19,15 +19,18 @@ import XCTest
 // ── F3 vector catalogue ───────────────────────────────────────────────────────
 
 /// A single F3 test vector.
+///
+/// Byte-exact expected output (under the fixed conformance salt) lives in
+/// `ConformanceVectorTests` + `Resources/vectors.json`. These vectors drive
+/// salt-independent property checks (PII removed, recoverable, ADR-0003 token
+/// shape, round-trip), since `redact(_:)` uses a fresh per-call salt.
 private struct F3Vector {
     let name: String
     let input: String
-    /// Expected placeholder key in the token map (e.g. `"[EMAIL_1]"`).
-    let expectedToken: String
+    /// The expected token label (ADR-0003 `[Label_<hex>]`), e.g. `"Email"`.
+    let expectedLabel: String
     /// The original value that should appear in the token map.
     let expectedOriginal: String
-    /// Expected redacted text (the input with the original replaced by the token).
-    let expectedText: String
 }
 
 // F3 baseline vectors — must all pass after REDACT-R6 integration.
@@ -36,55 +39,48 @@ private let f3Vectors: [F3Vector] = [
     F3Vector(
         name:             "email_simple",
         input:            "Contact alice@example.com for details.",
-        expectedToken:    "[EMAIL_1]",
-        expectedOriginal: "alice@example.com",
-        expectedText:     "Contact [EMAIL_1] for details."
+        expectedLabel:    "Email",
+        expectedOriginal: "alice@example.com"
     ),
     F3Vector(
         name:             "email_with_subdomain",
         input:            "Forward to bob.smith@mail.corp.io now.",
-        expectedToken:    "[EMAIL_1]",
-        expectedOriginal: "bob.smith@mail.corp.io",
-        expectedText:     "Forward to [EMAIL_1] now."
+        expectedLabel:    "Email",
+        expectedOriginal: "bob.smith@mail.corp.io"
     ),
     F3Vector(
         name:             "email_with_plus_tag",
         input:            "Reply to carol+tag@example.org.",
-        expectedToken:    "[EMAIL_1]",
-        expectedOriginal: "carol+tag@example.org",
-        expectedText:     "Reply to [EMAIL_1]."
+        expectedLabel:    "Email",
+        expectedOriginal: "carol+tag@example.org"
     ),
     // ── US Phone — dash format ─────────────────────────────────────────────
     F3Vector(
         name:             "phone_dash_format",
         input:            "Call 555-867-5309 for support.",
-        expectedToken:    "[PHONE_1]",
-        expectedOriginal: "555-867-5309",
-        expectedText:     "Call [PHONE_1] for support."
+        expectedLabel:    "Phone",
+        expectedOriginal: "555-867-5309"
     ),
     // ── US Phone — parenthesis format ─────────────────────────────────────
     F3Vector(
         name:             "phone_parens_format",
         input:            "Office: (415) 555-0100.",
-        expectedToken:    "[PHONE_1]",
-        expectedOriginal: "(415) 555-0100",
-        expectedText:     "Office: [PHONE_1]."
+        expectedLabel:    "Phone",
+        expectedOriginal: "(415) 555-0100"
     ),
     // ── US Phone — E.164 format ───────────────────────────────────────────
     F3Vector(
         name:             "phone_e164_format",
         input:            "Text +1-800-555-0199 anytime.",
-        expectedToken:    "[PHONE_1]",
-        expectedOriginal: "+1-800-555-0199",
-        expectedText:     "Text [PHONE_1] anytime."
+        expectedLabel:    "Phone",
+        expectedOriginal: "+1-800-555-0199"
     ),
     // ── SSN ────────────────────────────────────────────────────────────────
     F3Vector(
         name:             "ssn_basic",
         input:            "Patient SSN is 123-45-6789.",
-        expectedToken:    "[SSN_1]",
-        expectedOriginal: "123-45-6789",
-        expectedText:     "Patient SSN is [SSN_1]."
+        expectedLabel:    "Ssn",
+        expectedOriginal: "123-45-6789"
     ),
 ]
 
@@ -97,16 +93,25 @@ final class F3GoldenVectorTests: XCTestCase {
     func testF3VectorsRedact() throws {
         for vector in f3Vectors {
             let result = try OgenticRedact.redact(vector.input)
+
+            // Exactly one token, and it recovers the original.
+            XCTAssertEqual(result.tokenMap.count, 1, "[\(vector.name)] expected one token")
+            guard let token = result.tokenMap.keys.first else {
+                XCTFail("[\(vector.name)] no token produced")
+                continue
+            }
             XCTAssertEqual(
-                result.text,
-                vector.expectedText,
-                "[\(vector.name)] redacted text mismatch"
-            )
-            XCTAssertEqual(
-                result.tokenMap[vector.expectedToken],
+                result.tokenMap[token],
                 vector.expectedOriginal,
                 "[\(vector.name)] token map entry mismatch"
             )
+            // ADR-0003 grammar: `[Label_<lowercase-hex>]` with the expected label.
+            XCTAssertTrue(
+                token.hasPrefix("[\(vector.expectedLabel)_") && token.hasSuffix("]"),
+                "[\(vector.name)] token not in [\(vector.expectedLabel)_hex] shape: \(token)"
+            )
+            // The token appears in the text; the original does not.
+            XCTAssertTrue(result.text.contains(token), "[\(vector.name)] token missing from text")
             XCTAssertFalse(
                 result.text.contains(vector.expectedOriginal),
                 "[\(vector.name)] original value still present in redacted text"
