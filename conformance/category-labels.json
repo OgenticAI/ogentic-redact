@@ -1,0 +1,30 @@
+{
+  "$schema_note": "Shared category->label fixture for ADR-0003 token grammar. Source of truth mirrors ogentic-shield src/ogentic_shield/redaction.py CATEGORY_LABEL_TO_ENTITY_TYPES. A conformance test MUST assert this table equals Shield's; drift here silently re-creates cross-package token divergence (OGE-1684).",
+  "version": "1",
+  "fallback_rule": "For any Shield entity_type not listed below, label = entity_type.title().replace('_', '') — e.g. COUNSEL_COMMUNICATION -> CounselCommunication. The mapping is many-to-one: multiple entity types share one coarser label (e.g. EXECUTIVE_NAME -> Person), which reduces category leakage. The vault always stores the exact category; only the token shows the label.",
+  "label_to_entity_types": {
+    "Person":         ["PERSON", "EXECUTIVE_NAME", "PATIENT_NAME", "PROVIDER_NAME"],
+    "Address":        ["LOCATION"],
+    "Sponsor":        ["INSTITUTION_NAME", "LAW_FIRM_NAME", "FUND_INFORMATION"],
+    "Email":          ["EMAIL_ADDRESS"],
+    "Phone":          ["PHONE_NUMBER"],
+    "Ssn":            ["SSN", "US_SSN"],
+    "DateOfBirth":    ["DATE_OF_BIRTH"],
+    "InsuranceId":    ["INSURANCE_ID"],
+    "MedicalLicense": ["MEDICAL_LICENSE"],
+    "CaseNumber":     ["CASE_NUMBER"],
+    "BatesNumber":    ["BATES_NUMBER"],
+    "Diagnosis":      ["DIAGNOSIS_CODE"],
+    "Medication":     ["MEDICATION"],
+    "CreditCard":     ["CREDIT_CARD"],
+    "BankNumber":     ["US_BANK_NUMBER"],
+    "Url":            ["URL"],
+    "IpAddress":      ["IP_ADDRESS"],
+    "Passport":       ["US_PASSPORT"],
+    "Itin":           ["US_ITIN"],
+    "DriverLicense":  ["US_DRIVER_LICENSE"],
+    "DateTime":       ["DATE_TIME"],
+    "Iban":           ["IBAN_CODE"],
+    "Nationality":    ["NRP"]
+  }
+}
