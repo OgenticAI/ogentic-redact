@@ -21,7 +21,7 @@ OGE-1177 was raised because three sources disagreed about what this library is:
 
 The ticket observed that "these cannot both be built."
 
-**They were both built anyway**, and both shipped in v0.1.0 GA (2026-07-17) to crates.io, PyPI and npm.
+**They were both built anyway**, and both merged to `main` under the v0.1 GA milestone (2026-07-17). Note: the release pipeline (`release.yml`) fires only on a `v*` tag, and no tag has ever been pushed — so nothing is published to crates.io, PyPI or npm. The divergence lives in `main`, not in any registry.
 
 ### What is actually in the tree
 
@@ -38,7 +38,7 @@ Two further facts settle the question of which stack "won":
 
 2. **ADR-0001 is not implemented by anything.** It is `Status: Accepted` (2026-07-16) and specifies a fifth format, `[[CATEGORY_nn]]` — double brackets, zero-padded, starting at `01`, with defined escaping for literal `[[`. No surface emits it.
 
-So F0 was never decided. It was answered twice, in parallel, and both answers were published.
+So F0 was never decided. It was answered twice, in parallel, and both answers were merged.
 
 ### The reframing
 
@@ -105,19 +105,19 @@ Therefore this decision is only complete when it is **mechanically enforced**:
 
 ### Negative — accepted with open eyes
 
-- **This is a capability regression for existing PyPI users.** `pip install ogentic-redact` today detects everything Presidio detects; over the Rust core alone it detects EMAIL. This is the strongest argument for Python-only and it is real.
+- **This would be a capability regression for PyPI users once published.** The current (unpublished) Python path detects everything Presidio detects; over the Rust core alone it detects EMAIL. Nothing is on PyPI yet, so no existing user is affected — but this is the strongest argument for Python-only and it is real for the first release.
 - Mitigation, and a hard sequencing constraint: **OGE-1230 (Shield span integration) lands before `stream.py` is touched.** Until Shield can supply spans to the Python surface, removing Presidio would strand users. No ticket may narrow the Python detection surface ahead of OGE-1230.
 - The binding matrix (PyO3, napi, C FFI, Swift) is a standing maintenance cost — four release targets and four CI paths, as the 2026-07-20 CI repair demonstrated.
 
 ### Neutral
 
-- v0.1.0 is already published to three registries under the divergent behaviour described above. This ADR does not retract it; the reconciliation lands in the next release.
+- v0.1 is built and merged to `main` under the divergent behaviour described above, but **not tagged and not published** to any registry. The reconciliation therefore lands *before* the first release tag — there is no shipped artifact to retract and no external consumer to migrate.
 
 ---
 
 ## Alternatives considered
 
-**Python-only.** Rejected. It forfeits Swift/iOS and wasm permanently, makes Sotto Desktop's on-device story a bundled Python runtime, and discards a working Rust core, FFI crate, and Swift binding. It also would not fix the token-format divergence, which is orthogonal to language choice. Its one genuine merit — no capability regression for PyPI users — is addressed by the sequencing constraint above.
+**Python-only.** Rejected. It forfeits Swift/iOS and wasm permanently, makes Sotto Desktop's on-device story a bundled Python runtime, and discards a working Rust core, FFI crate, and Swift binding. It also would not fix the token-format divergence, which is orthogonal to language choice. Its one genuine merit — no capability regression for future PyPI users — is addressed by the sequencing constraint above.
 
 **Status quo (ship both).** Rejected. It is what produced five token formats and an unimplemented ADR. A token emitted by one surface cannot be unredacted by another, silently — a correctness defect in a shipped GA release.
 
