@@ -18,25 +18,37 @@ pub fn version() -> String {
 /// The result of a `redact` call.
 #[napi(object)]
 pub struct RedactResult {
-    /// Redacted text with numbered placeholder tokens, e.g. `"[EMAIL_1]"`.
+    /// Redacted text with salted placeholder tokens, e.g. `"[Email_3f8a2c1b]"`.
     pub text: String,
     /// Maps each placeholder to the original value it replaced.
     pub tokens: HashMap<String, String>,
 }
 
-/// Redact PII in `text`.
+impl From<ogentic_redact_core::RedactOneWayResult> for RedactResult {
+    fn from(r: ogentic_redact_core::RedactOneWayResult) -> Self {
+        RedactResult {
+            text: r.text,
+            tokens: r.tokens,
+        }
+    }
+}
+
+/// Redact PII in `text` (ADR-0003 grammar `[Label_<salted-hex>]`).
 ///
-/// Returns `{ text: string, tokens: Record<string, string> }` where `text` is
-/// the redacted string and `tokens` maps placeholders to original values.
-///
-/// Output is byte-identical to the Python and Swift bindings for the same input.
+/// Returns `{ text: string, tokens: Record<string, string> }`. Uses a fresh
+/// per-call salt, so the same value redacts differently across calls; use
+/// `redactWithSalt` for reproducible output.
 #[napi]
 pub fn redact(text: String) -> RedactResult {
-    let result = ogentic_redact_core::redact_one_way(&text);
-    RedactResult {
-        text: result.text,
-        tokens: result.tokens,
-    }
+    ogentic_redact_core::redact_one_way(&text).into()
+}
+
+/// Like `redact`, but with an explicit `salt` (bytes) so the salted-hex tokens
+/// are reproducible. Surfaces sharing the same salt produce byte-identical
+/// output — the basis of the cross-language conformance vectors.
+#[napi]
+pub fn redact_with_salt(text: String, salt: napi::bindgen_prelude::Buffer) -> RedactResult {
+    ogentic_redact_core::redact_one_way_with_salt(&text, salt.as_ref()).into()
 }
 
 /// Restore redacted placeholders in `text` using the `tokens` map from a prior

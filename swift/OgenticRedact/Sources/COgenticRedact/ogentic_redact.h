@@ -58,17 +58,18 @@ void ogentic_redact_free(uint8_t *ptr, size_t len);
 /* ── synchronous API ──────────────────────────────────────────────────────── */
 
 /**
- * Redact PII in `input`.
+ * Redact PII in `input` (ADR-0003 grammar).
  *
  * Scans `input` for recognisable PII patterns (email, US phone, SSN) and
- * replaces each occurrence with a deterministic placeholder token such as
- * `[EMAIL_1]`.
+ * replaces each with a salted placeholder token such as `[Email_3f8a2c1b]`.
+ * A fresh per-call salt is used, so the same value redacts differently across
+ * calls; use `ogentic_redact_with_salt` for reproducible output.
  *
  * Returns a heap-allocated JSON byte buffer of the form:
  * ```json
  * {
- *   "text":   "Contact [EMAIL_1] for info.",
- *   "tokens": { "[EMAIL_1]": "alice@example.com" }
+ *   "text":   "Contact [Email_3f8a2c1b] for info.",
+ *   "tokens": { "[Email_3f8a2c1b]": "alice@example.com" }
  * }
  * ```
  * Sets `*out_len` to the byte length of the buffer (it is NOT
@@ -87,6 +88,26 @@ void ogentic_redact_free(uint8_t *ptr, size_t len);
 uint8_t *ogentic_redact(const uint8_t *input,
                          size_t         input_len,
                          size_t        *out_len);
+
+/**
+ * Redact PII in `input` using an explicit `salt`, so the salted-hex tokens are
+ * reproducible. Surfaces that share the same `salt` bytes produce byte-identical
+ * output — this is how the cross-language conformance vectors stay deterministic.
+ *
+ * Same return contract and memory ownership as `ogentic_redact`.
+ *
+ * @param input      Pointer to UTF-8 encoded input bytes.
+ * @param input_len  Length of `input` in bytes.
+ * @param salt       Pointer to salt bytes (may be NULL/empty; any length).
+ * @param salt_len   Length of `salt` in bytes.
+ * @param out_len    Set to the byte length of the returned buffer, 0 on error.
+ * @return           Heap-allocated buffer, or NULL on error.
+ */
+uint8_t *ogentic_redact_with_salt(const uint8_t *input,
+                                   size_t         input_len,
+                                   const uint8_t *salt,
+                                   size_t         salt_len,
+                                   size_t        *out_len);
 
 /**
  * Restore redacted placeholders in `input`.

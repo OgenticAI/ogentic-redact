@@ -541,6 +541,7 @@ dependencies = [
 name = "ogentic-redact-ffi"
 version = "0.1.0"
 dependencies = [
+ "ogentic-redact-core",
  "serde_json",
 ]
 
