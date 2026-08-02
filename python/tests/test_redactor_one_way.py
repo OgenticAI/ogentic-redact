@@ -127,7 +127,7 @@ class TestF3VectorCompliance:
             [
                 Span(start=0, end=8, entity_type="PERSON", group=0),
                 Span(start=11, end=27, entity_type="EMAIL_ADDRESS", group=0),
-                Span(start=35, end=46, entity_type="US_SSN", group=0),
+                Span(start=35, end=44, entity_type="US_SSN", group=0),
             ],
         )
         assert redacted.vault == {}
