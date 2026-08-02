@@ -38,10 +38,10 @@ _ENTITY_TYPES = st.sampled_from(["EMAIL", "PHONE", "NAME", "SSN", "DATE"])
 @given(text=_SAFE_TEXT)
 @settings(max_examples=300)
 def test_round_trip_identity_empty_spans(text: str) -> None:
-    """unredact(redact(x, []).text, vault) == x for any text with no spans."""
+    """unredact(redact(x, []).text, mapping_id) == x for any text with no spans."""
     r = Redactor(reversible=True)
     result = r.redact(text, [])
-    assert r.unredact(result.text, result.vault) == text
+    assert r.unredact(result.text, result.mapping_id) == text
 
 
 @given(
@@ -55,7 +55,7 @@ def test_round_trip_identity_single_span(text: str, entity_type: str) -> None:
     end = max(1, len(text) // 2)
     span = Span(start=0, end=end, entity_type=entity_type, group=0)
     result = r.redact(text, [span])
-    assert r.unredact(result.text, result.vault) == text
+    assert r.unredact(result.text, result.mapping_id) == text
 
 
 @given(
@@ -68,7 +68,7 @@ def test_round_trip_identity_full_span(text: str, entity_type: str) -> None:
     r = Redactor(reversible=True)
     span = Span(start=0, end=len(text), entity_type=entity_type, group=0)
     result = r.redact(text, [span])
-    assert r.unredact(result.text, result.vault) == text
+    assert r.unredact(result.text, result.mapping_id) == text
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +84,9 @@ def test_tokens_differ_across_calls(text: str, entity_type: str) -> None:
     r = Redactor(reversible=True)
     result_a = r.redact(text, [span])
     result_b = r.redact(text, [span])
-    assert set(result_a.vault.keys()).isdisjoint(set(result_b.vault.keys()))
+    vault_a = r.vault.fetch(result_a.mapping_id, "")
+    vault_b = r.vault.fetch(result_b.mapping_id, "")
+    assert set(vault_a.keys()).isdisjoint(set(vault_b.keys()))
 
 
 @given(text=_NONEMPTY_TEXT, entity_type=_ENTITY_TYPES)
@@ -93,7 +95,8 @@ def test_tokens_differ_across_three_calls(text: str, entity_type: str) -> None:
     """Token sets across three independent calls are mutually disjoint."""
     span = Span(start=0, end=len(text), entity_type=entity_type, group=0)
     r = Redactor(reversible=True)
-    sets = [set(r.redact(text, [span]).vault.keys()) for _ in range(3)]
+    results = [r.redact(text, [span]) for _ in range(3)]
+    sets = [set(r.vault.fetch(res.mapping_id, "").keys()) for res in results]
     # Each pair must be disjoint
     assert sets[0].isdisjoint(sets[1])
     assert sets[0].isdisjoint(sets[2])
@@ -127,9 +130,10 @@ def test_within_call_token_stability(value: str, sep: str, entity_type: str) -> 
     )
     r = Redactor(reversible=True)
     result = r.redact(text, [span1, span2])
+    vault = r.vault.fetch(result.mapping_id, "")
     # Same value and entity_type → one unique vault entry
-    assert len(result.vault) == 1
-    (token,) = result.vault.keys()
+    assert len(vault) == 1
+    (token,) = vault.keys()
     # Token appears twice in the redacted text
     assert result.text.count(token) == 2
 
@@ -144,8 +148,9 @@ def test_within_call_vault_maps_to_original(value: str, entity_type: str) -> Non
     span = Span(start=0, end=len(value), entity_type=entity_type, group=0)
     r = Redactor(reversible=True)
     result = r.redact(value, [span])
-    assert len(result.vault) == 1
-    assert next(iter(result.vault.values())) == value
+    vault = r.vault.fetch(result.mapping_id, "")
+    assert len(vault) == 1
+    assert next(iter(vault.values())) == value
 
 
 # ---------------------------------------------------------------------------
@@ -293,27 +298,31 @@ def test_unredact_raises_when_not_reversible() -> None:
     """`unredact()` raises ValueError on a one-way Redactor."""
     r = Redactor(reversible=False)
     with pytest.raises(ValueError, match="reversible"):
-        r.unredact("text", {})
+        r.unredact("text", "fake_mapping_id")
 
 
 def test_unredact_raises_on_missing_token() -> None:
-    """`unredact()` raises KeyError when a vault token is not in the text."""
-    r = Redactor(reversible=True)
+    """`unredact()` raises an error when a vault token is not in the text."""
+    from ogentic_redact.vault import InProcessVault
+    r = Redactor(reversible=True, vault=InProcessVault())
+    mapping_id = r.vault.store({"[RTKN_deadbeef0000]": "secret"}, "")
     with pytest.raises(KeyError):
-        r.unredact("no tokens here", {"[RTKN_deadbeef0000]": "secret"})
+        r.unredact("no tokens here", mapping_id)
 
 
 def test_unredact_raises_on_non_string_input() -> None:
     """`unredact()` raises TypeError when redacted_text is not a str."""
     r = Redactor(reversible=True)
     with pytest.raises(TypeError):
-        r.unredact(None, {})  # type: ignore[arg-type]
+        r.unredact(None, "fake_mapping_id")  # type: ignore[arg-type]
 
 
 def test_unredact_empty_vault_returns_text_unchanged() -> None:
     """`unredact()` with an empty vault returns the text unchanged."""
-    r = Redactor(reversible=True)
-    assert r.unredact("some text", {}) == "some text"
+    from ogentic_redact.vault import InProcessVault
+    r = Redactor(reversible=True, vault=InProcessVault())
+    mapping_id = r.vault.store({}, "")
+    assert r.unredact("some text", mapping_id) == "some text"
 
 
 # --- Redactor.resolve_overlaps failure paths ---
