@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
+from collections import Counter
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
+from ogentic_redact.audit import AuditDetectionEvent, AuditEmitter
+from ogentic_redact.errors import AuditError
+from ogentic_redact.logging import log_structured
 from ogentic_redact.span import Span
+
+if TYPE_CHECKING:
+    pass
 
 
 @dataclass
@@ -45,13 +54,31 @@ class Redactor:
     def __init__(self, reversible: bool = False) -> None:
         self.reversible = reversible
 
-    def redact(self, text: str, spans: list[Span] | None = None) -> RedactResult:
+    def redact(
+        self,
+        text: str,
+        spans: list[Span] | None = None,
+        audit_emitter: AuditEmitter | None = None,
+        tenant_id: str = "",
+        request_id: str = "",
+        profile: str = "default",
+    ) -> RedactResult:
         """Redact *spans* from *text*.
 
         Args:
             text: Source string to redact.
             spans: Entity spans to replace.  Overlapping spans are resolved
                 before replacement; see :meth:`resolve_overlaps`.
+            audit_emitter: Optional audit event emitter. If provided, an audit
+                detection event is emitted for each detected entity type. If
+                audit emission fails, redaction raises :class:`AuditError`
+                (fail-closed).
+            tenant_id: Tenant identifier for audit context. Required if
+                audit_emitter is provided.
+            request_id: Request identifier for audit context. Required if
+                audit_emitter is provided.
+            profile: Profile name (e.g., "shield-legal", "default") for audit
+                context.
 
         Returns:
             A :class:`RedactResult` with the redacted text and, in reversible
@@ -61,6 +88,8 @@ class Redactor:
             TypeError: If *text* is not a :class:`str`.
             ValueError: If any span has ``start < 0``, ``end > len(text)``,
                 or ``start >= end``.
+            AuditError: If audit_emitter is provided and audit event emission
+                fails (fail-closed).
         """
         if not isinstance(text, str):
             raise TypeError(f"text must be str, got {type(text).__name__!r}")
@@ -81,10 +110,13 @@ class Redactor:
         vault: dict[str, str] = {}
         # Within-call stability: same (value, entity_type) → same token.
         _seen: dict[tuple[str, str], str] = {}
+        # Track entity types and counts for audit.
+        entity_counts: dict[str, int] = Counter()
 
         # Replace right-to-left so earlier indices stay valid.
         for span in sorted(resolved, key=lambda s: s.start, reverse=True):
             value = text[span.start : span.end]
+            entity_counts[span.entity_type] += 1
 
             if self.reversible:
                 key = (value, span.entity_type)
@@ -102,7 +134,48 @@ class Redactor:
 
             text = text[: span.start] + token + text[span.end :]
 
-        return RedactResult(text=text, vault=vault)
+        result = RedactResult(text=text, vault=vault)
+
+        if audit_emitter is not None:
+            mode = "reversible" if self.reversible else "one-way"
+            for entity_type, count in entity_counts.items():
+                mapping_id = None
+                if self.reversible and vault:
+                    mapping_ids = [
+                        token
+                        for token in vault
+                        if token.startswith("[RTKN_")
+                    ]
+                    if mapping_ids:
+                        mapping_id = mapping_ids[0]
+
+                event = AuditDetectionEvent(
+                    entity_type=entity_type,
+                    mode=mode,
+                    profile=profile,
+                    count=count,
+                    mapping_id=mapping_id,
+                    tenant_id=tenant_id,
+                    request_id=request_id,
+                )
+
+                try:
+                    audit_emitter.emit(event)
+                except Exception as e:
+                    log_structured(
+                        logging.ERROR,
+                        "audit event emission failed",
+                        tenant_id=tenant_id,
+                        request_id=request_id,
+                        op="redact",
+                        entity_type=entity_type,
+                        error=str(e),
+                    )
+                    raise AuditError(
+                        "audit event recording failed; redaction not completed"
+                    ) from e
+
+        return result
 
     def unredact(self, redacted_text: str, vault: dict[str, str]) -> str:
         """Restore original text from *redacted_text* using *vault*.
