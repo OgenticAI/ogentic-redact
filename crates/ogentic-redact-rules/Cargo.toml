@@ -23,5 +23,6 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 ogentic-redact-core = { workspace = true }
 thiserror = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+regex = { workspace = true }

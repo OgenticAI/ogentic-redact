@@ -1,0 +1,50 @@
+{
+  "category": "PRIVILEGE",
+  "precedence_group": "legal_privilege",
+  "entities": [
+    {
+      "entity_type": "ATTORNEY_CLIENT_PRIVILEGE",
+      "patterns": [
+        {
+          "regex": "(?i)(attorney[- ]?client privilege|work product|privileged communication)"
+        },
+        {
+          "regex": "(?i)(confidential communication|protected from disclosure)"
+        }
+      ],
+      "recognizers": []
+    },
+    {
+      "entity_type": "LEGAL_CORRESPONDENCE",
+      "patterns": [
+        {
+          "regex": "(?i)\\b(attorney|counsel|lawyer)\\b.*(?i)(advise|advice|opinion|legal analysis)"
+        }
+      ],
+      "recognizers": [
+        {
+          "recognizer_type": "builtin",
+          "name": "email"
+        }
+      ]
+    },
+    {
+      "entity_type": "INTERNAL_LEGAL_MEMO",
+      "patterns": [
+        {
+          "regex": "(?i)(legal memo|attorney memo|privileged memo|confidential legal)"
+        }
+      ],
+      "recognizers": []
+    },
+    {
+      "entity_type": "SETTLEMENT_DISCUSSION",
+      "patterns": [
+        {
+          "regex": "(?i)(settlement negotiation|settlement offer|without prejudice|settlement discussion)"
+        }
+      ],
+      "recognizers": []
+    }
+  ]
+}
