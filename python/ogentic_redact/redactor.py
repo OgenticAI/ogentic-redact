@@ -5,8 +5,12 @@ from __future__ import annotations
 import hashlib
 import os
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from ogentic_redact.span import Span
+
+if TYPE_CHECKING:
+    from ogentic_redact.vault import Vault
 
 
 @dataclass
@@ -15,12 +19,14 @@ class RedactResult:
 
     Attributes:
         text: The redacted text.
-        vault: Mapping from token to original value.  Only populated when
-            :class:`Redactor` was constructed with ``reversible=True``.
+        vault: Deprecated. Kept for backwards compatibility; always empty in reversible mode.
+        mapping_id: Opaque identifier for retrieving mapping from vault.
+            Only set when :class:`Redactor` was constructed with ``reversible=True``.
     """
 
     text: str
     vault: dict[str, str] = field(default_factory=dict)
+    mapping_id: str | None = None
 
 
 class Redactor:
@@ -31,9 +37,9 @@ class Redactor:
     * **One-way** (default): each span is replaced with a bracketed entity
       label, e.g. ``[EMAIL]``.  The original value cannot be recovered.
     * **Reversible** (``reversible=True``): each span is replaced with a
-      salted opaque token, e.g. ``[RTKN_3a7f9c12ab01]``, and the
-      :attr:`RedactResult.vault` mapping token→original is returned.  The
-      vault is never stored inline — callers own the vault lifecycle.
+      salted opaque token, e.g. ``[RTKN_3a7f9c12ab01]``, and the mapping is
+      stored in a separate Vault. An opaque mapping_id is returned; the
+      original plaintext mapping is never returned inline.
 
     Salt semantics:
         A fresh 128-bit random salt is generated on every :meth:`redact`
@@ -42,25 +48,41 @@ class Redactor:
         maps to the same token (within-call stability).
     """
 
-    def __init__(self, reversible: bool = False) -> None:
+    def __init__(
+        self,
+        reversible: bool = False,
+        vault: Vault | None = None,
+    ) -> None:
         self.reversible = reversible
+        self.vault = vault
+        if reversible and vault is None:
+            from ogentic_redact.vault import InProcessVault
 
-    def redact(self, text: str, spans: list[Span] | None = None) -> RedactResult:
+            self.vault = InProcessVault()
+
+    def redact(
+        self,
+        text: str,
+        spans: list[Span] | None = None,
+        matter_id: str = "",
+    ) -> RedactResult:
         """Redact *spans* from *text*.
 
         Args:
             text: Source string to redact.
             spans: Entity spans to replace.  Overlapping spans are resolved
                 before replacement; see :meth:`resolve_overlaps`.
+            matter_id: Tenant/matter identifier for vault scoping. Defaults to
+                empty string for single-tenant scenarios.
 
         Returns:
             A :class:`RedactResult` with the redacted text and, in reversible
-            mode, the token→original vault.
+            mode, the opaque mapping_id (never the plaintext vault).
 
         Raises:
             TypeError: If *text* is not a :class:`str`.
             ValueError: If any span has ``start < 0``, ``end > len(text)``,
-                or ``start >= end``.
+                or ``start >= end``, or if vault storage fails.
         """
         if not isinstance(text, str):
             raise TypeError(f"text must be str, got {type(text).__name__!r}")
@@ -78,7 +100,7 @@ class Redactor:
         # Per-call salt: ensures tokens differ across independent calls.
         salt = os.urandom(16).hex()
 
-        vault: dict[str, str] = {}
+        vault_dict: dict[str, str] = {}
         # Within-call stability: same (value, entity_type) → same token.
         _seen: dict[tuple[str, str], str] = {}
 
@@ -94,7 +116,7 @@ class Redactor:
                     ).hexdigest()[:12]
                     token = f"[RTKN_{digest}]"
                     _seen[key] = token
-                    vault[token] = value
+                    vault_dict[token] = value
                 else:
                     token = _seen[key]
             else:
@@ -102,21 +124,35 @@ class Redactor:
 
             text = text[: span.start] + token + text[span.end :]
 
-        return RedactResult(text=text, vault=vault)
+        mapping_id = None
+        if self.reversible:
+            try:
+                mapping_id = self.vault.store(vault_dict, matter_id)
+            except Exception as e:
+                raise ValueError("Vault storage failed (details hidden)") from e
 
-    def unredact(self, redacted_text: str, vault: dict[str, str]) -> str:
-        """Restore original text from *redacted_text* using *vault*.
+        return RedactResult(text=text, vault={}, mapping_id=mapping_id)
+
+    def unredact(
+        self,
+        redacted_text: str,
+        mapping_id: str,
+        matter_id: str = "",
+    ) -> str:
+        """Restore original text from *redacted_text* using vault lookup.
 
         Args:
             redacted_text: A string previously returned by :meth:`redact`.
-            vault: The :attr:`RedactResult.vault` from the same call.
+            mapping_id: The :attr:`RedactResult.mapping_id` from the same call.
+            matter_id: Tenant/matter identifier. Must match the one passed to redact().
 
         Returns:
             The original text with all tokens substituted back.
 
         Raises:
             ValueError: If the :class:`Redactor` was not created with
-                ``reversible=True``.
+                ``reversible=True``, or if mapping_id is not found under matter_id,
+                or if vault access fails.
             TypeError: If *redacted_text* is not a :class:`str`.
             KeyError: If a vault token is not present in *redacted_text*.
         """
@@ -127,8 +163,15 @@ class Redactor:
                 f"redacted_text must be str, got {type(redacted_text).__name__!r}"
             )
 
+        try:
+            vault_dict = self.vault.fetch(mapping_id, matter_id)
+        except Exception as e:
+            raise ValueError(
+                f"Unable to restore mapping_id={mapping_id!r} under matter_id={matter_id!r}"
+            ) from e
+
         result = redacted_text
-        for token, original in vault.items():
+        for token, original in vault_dict.items():
             if token not in result:
                 raise KeyError(f"Token {token!r} not found in redacted text")
             result = result.replace(token, original)
