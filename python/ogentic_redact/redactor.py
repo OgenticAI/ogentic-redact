@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import os
+import warnings
 from dataclasses import dataclass, field
 
 from ogentic_redact.span import Span
+
+_cloud_warned: bool = False
 
 
 @dataclass
@@ -35,6 +38,12 @@ class Redactor:
       :attr:`RedactResult.vault` mapping token→original is returned.  The
       vault is never stored inline — callers own the vault lifecycle.
 
+    Cloud recognisers:
+        By default, the redactor operates on-device only (localhost). Cloud-
+        assisted recognisers require explicit ``cloud=True`` opt-in and emit a
+        first-use runtime warning. Attempting to use cloud recognisers without
+        the flag raises :class:`LocalhostOnlyError`.
+
     Salt semantics:
         A fresh 128-bit random salt is generated on every :meth:`redact`
         call, so the same value produces *different* tokens across calls.
@@ -42,8 +51,9 @@ class Redactor:
         maps to the same token (within-call stability).
     """
 
-    def __init__(self, reversible: bool = False) -> None:
+    def __init__(self, reversible: bool = False, cloud: bool = False) -> None:
         self.reversible = reversible
+        self.cloud = cloud
 
     def redact(self, text: str, spans: list[Span] | None = None) -> RedactResult:
         """Redact *spans* from *text*.
@@ -61,9 +71,23 @@ class Redactor:
             TypeError: If *text* is not a :class:`str`.
             ValueError: If any span has ``start < 0``, ``end > len(text)``,
                 or ``start >= end``.
+            LocalhostOnlyError: If a cloud recogniser is requested without
+                explicit ``cloud=True`` opt-in.
         """
         if not isinstance(text, str):
             raise TypeError(f"text must be str, got {type(text).__name__!r}")
+
+        if self.cloud:
+            global _cloud_warned
+            if not _cloud_warned:
+                warnings.warn(
+                    "Cloud-assisted recognisers are enabled. Sensitive data may be "
+                    "sent to external services. Disable with cloud=False to enforce "
+                    "on-device-only redaction.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                _cloud_warned = True
 
         spans = spans or []
 
