@@ -16,9 +16,10 @@ class TestOneWayIrreversible:
 
     def test_one_way_no_vault(self) -> None:
         redactor = Redactor(reversible=False)
+        text = "My email is alice@example.com"
         result = redactor.redact(
-            "My email is alice@example.com",
-            [Span(start=12, end=31, entity_type="EMAIL_ADDRESS", group=0)],
+            text,
+            [Span(start=12, end=29, entity_type="EMAIL_ADDRESS", group=0)],
         )
         assert result.vault == {}
         assert "[EMAIL_ADDRESS]" in result.text
@@ -35,9 +36,10 @@ class TestOneWayIrreversible:
 
     def test_reversible_has_vault(self) -> None:
         redactor = Redactor(reversible=True)
+        text = "My email is alice@example.com"
         result = redactor.redact(
-            "My email is alice@example.com",
-            [Span(start=12, end=31, entity_type="EMAIL_ADDRESS", group=0)],
+            text,
+            [Span(start=12, end=29, entity_type="EMAIL_ADDRESS", group=0)],
         )
         assert len(result.vault) > 0
         assert any("alice@example.com" in v for v in result.vault.values())
@@ -48,9 +50,10 @@ class TestLocalhostOnlyGuard:
 
     def test_localhost_only_default(self) -> None:
         redactor = Redactor(cloud=False)
+        text = "Contact: alice@example.com"
         result = redactor.redact(
-            "Contact: alice@example.com",
-            [Span(start=9, end=28, entity_type="EMAIL_ADDRESS", group=0)],
+            text,
+            [Span(start=9, end=26, entity_type="EMAIL_ADDRESS", group=0)],
         )
         assert "[EMAIL_ADDRESS]" in result.text
         assert "alice@example.com" not in result.text
@@ -64,11 +67,12 @@ class TestCloudOptIn:
         redactor_module._cloud_warned = False
 
         redactor = Redactor(cloud=True)
+        text = "Contact: alice@example.com"
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             redactor.redact(
-                "Contact: alice@example.com",
-                [Span(start=9, end=28, entity_type="EMAIL_ADDRESS", group=0)],
+                text,
+                [Span(start=9, end=26, entity_type="EMAIL_ADDRESS", group=0)],
             )
             assert len(w) == 1
             assert issubclass(w[0].category, UserWarning)
@@ -99,11 +103,12 @@ class TestCloudOptIn:
         redactor_module._cloud_warned = False
 
         redactor = Redactor(cloud=False)
+        text = "Contact: alice@example.com"
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             redactor.redact(
-                "Contact: alice@example.com",
-                [Span(start=9, end=28, entity_type="EMAIL_ADDRESS", group=0)],
+                text,
+                [Span(start=9, end=26, entity_type="EMAIL_ADDRESS", group=0)],
             )
             warning_count = len(
                 [x for x in w if "Cloud-assisted" in str(x.message)]
@@ -116,12 +121,13 @@ class TestF3VectorCompliance:
 
     def test_one_way_no_reidentification_path(self) -> None:
         redactor = Redactor(reversible=False)
+        text = "John Doe, john@example.com, SSN: 123-45-6789"
         redacted = redactor.redact(
-            "John Doe, john@example.com, SSN: 123-45-6789",
+            text,
             [
                 Span(start=0, end=8, entity_type="PERSON", group=0),
-                Span(start=11, end=28, entity_type="EMAIL_ADDRESS", group=0),
-                Span(start=36, end=47, entity_type="US_SSN", group=0),
+                Span(start=11, end=27, entity_type="EMAIL_ADDRESS", group=0),
+                Span(start=35, end=46, entity_type="US_SSN", group=0),
             ],
         )
         assert redacted.vault == {}
