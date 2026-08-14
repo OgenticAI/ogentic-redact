@@ -2,7 +2,24 @@
 
 from __future__ import annotations
 
-__all__ = ["LocalhostOnlyError"]
+__all__ = [
+    "LocalhostOnlyError",
+    "RedactError",
+    "VaultError",
+    "VaultNotFound",
+]
+
+
+class RedactError(Exception):
+    """Base exception for redaction errors."""
+
+
+class VaultError(RedactError):
+    """Base exception for vault operations."""
+
+
+class VaultNotFound(VaultError):
+    """Mapping not found under the given matter_id."""
 
 
 class LocalhostOnlyError(Exception):
