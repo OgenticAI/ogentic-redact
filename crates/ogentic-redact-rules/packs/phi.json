@@ -1,0 +1,74 @@
+{
+  "category": "PHI",
+  "precedence_group": "protected_health_info",
+  "entities": [
+    {
+      "entity_type": "DIAGNOSIS",
+      "patterns": [
+        {
+          "regex": "(?i)(diagnosis|diagnosed with|suffering from|patient has|condition:|disorders?:)"
+        },
+        {
+          "regex": "(?i)(cancer|diabetes|hypertension|heart disease|schizophrenia|bipolar|depression|anxiety)"
+        }
+      ],
+      "recognizers": []
+    },
+    {
+      "entity_type": "TREATMENT",
+      "patterns": [
+        {
+          "regex": "(?i)(treatment|medication|prescribed|therapy|procedure|surgery|hospitalization)"
+        },
+        {
+          "regex": "(?i)(chemotherapy|radiation|dialysis|ventilator|insulin|antidepressant)"
+        }
+      ],
+      "recognizers": []
+    },
+    {
+      "entity_type": "MEDICAL_IDENTIFIER",
+      "patterns": [
+        {
+          "regex": "(?i)(patient ID|medical record|MRN|chart number)\\s*:?\\s*\\d+"
+        },
+        {
+          "regex": "(?i)(DOB|date of birth)\\s*[:/]?\\s*\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4}"
+        }
+      ],
+      "recognizers": []
+    },
+    {
+      "entity_type": "PRESCRIPTION",
+      "patterns": [
+        {
+          "regex": "(?i)(prescription|rx|dosage|mg|ml|tablets?|capsules?|dose)"
+        }
+      ],
+      "recognizers": []
+    },
+    {
+      "entity_type": "MEDICAL_PROVIDER",
+      "patterns": [
+        {
+          "regex": "(?i)(Dr\\.?|Doctor|Physician|MD|nurse|RN|therapist|psychiatrist)"
+        }
+      ],
+      "recognizers": [
+        {
+          "recognizer_type": "builtin",
+          "name": "email"
+        }
+      ]
+    },
+    {
+      "entity_type": "CLINICAL_NOTES",
+      "patterns": [
+        {
+          "regex": "(?i)(clinical note|progress note|discharge note|soap note|vital signs)"
+        }
+      ],
+      "recognizers": []
+    }
+  ]
+}

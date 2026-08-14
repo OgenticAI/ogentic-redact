@@ -1,0 +1,90 @@
+{
+  "category": "MNPI",
+  "precedence_group": "material_nonpublic_info",
+  "entities": [
+    {
+      "entity_type": "EARNINGS_GUIDANCE",
+      "patterns": [
+        {
+          "regex": "(?i)(earnings guidance|revenue guidance|forecast|guidance range|expected earnings)"
+        },
+        {
+          "regex": "(?i)(EPS guidance|profit guidance|margin guidance)"
+        }
+      ],
+      "recognizers": []
+    },
+    {
+      "entity_type": "ACQUISITION_TARGET",
+      "patterns": [
+        {
+          "regex": "(?i)(acquisition target|acquisition candidate|M&A target|potential acquisition)"
+        },
+        {
+          "regex": "(?i)(confidential merger|confidential acquisition)"
+        }
+      ],
+      "recognizers": []
+    },
+    {
+      "entity_type": "FINANCIAL_PERFORMANCE",
+      "patterns": [
+        {
+          "regex": "(?i)(revenue per|EBITDA|operating margin|profit margin|net income forecast)"
+        },
+        {
+          "regex": "\\$\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?\\s*(?i)(million|billion|thousand|M|B|K)"
+        }
+      ],
+      "recognizers": []
+    },
+    {
+      "entity_type": "PRODUCT_LAUNCH",
+      "patterns": [
+        {
+          "regex": "(?i)(product launch date|launch in Q[1-4]|expected launch|launch confidential)"
+        },
+        {
+          "regex": "(?i)(unreleased product|confidential product|under development)"
+        }
+      ],
+      "recognizers": []
+    },
+    {
+      "entity_type": "CORPORATE_ACTION",
+      "patterns": [
+        {
+          "regex": "(?i)(stock split|dividend increase|share repurchase|debt issuance|equity offering)"
+        },
+        {
+          "regex": "(?i)(executive change|CEO succession|boardroom change)"
+        }
+      ],
+      "recognizers": []
+    },
+    {
+      "entity_type": "MATERIAL_LITIGATION",
+      "patterns": [
+        {
+          "regex": "(?i)(material lawsuit|significant litigation|regulatory investigation|DOJ investigation)"
+        },
+        {
+          "regex": "(?i)(product recall|regulatory violation|material fine)"
+        }
+      ],
+      "recognizers": []
+    },
+    {
+      "entity_type": "INSIDER_TRADING_SIGNAL",
+      "patterns": [
+        {
+          "regex": "(?i)(insider trading|confidential before public|embargo|do not disclose)"
+        },
+        {
+          "regex": "(?i)(for authorized recipients only|restricted information|selective disclosure)"
+        }
+      ],
+      "recognizers": []
+    }
+  ]
+}
