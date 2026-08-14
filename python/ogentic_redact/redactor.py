@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,8 @@ from ogentic_redact.span import Span
 
 if TYPE_CHECKING:
     from ogentic_redact.vault import Vault
+
+_cloud_warned: bool = False
 
 
 @dataclass
@@ -41,6 +44,12 @@ class Redactor:
       stored in a separate Vault. An opaque mapping_id is returned; the
       original plaintext mapping is never returned inline.
 
+    Cloud recognisers:
+        By default, the redactor operates on-device only (localhost). Cloud-
+        assisted recognisers require explicit ``cloud=True`` opt-in and emit a
+        first-use runtime warning. Attempting to use cloud recognisers without
+        the flag raises :class:`LocalhostOnlyError`.
+
     Salt semantics:
         A fresh 128-bit random salt is generated on every :meth:`redact`
         call, so the same value produces *different* tokens across calls.
@@ -52,8 +61,10 @@ class Redactor:
         self,
         reversible: bool = False,
         vault: Vault | None = None,
+        cloud: bool = False,
     ) -> None:
         self.reversible = reversible
+        self.cloud = cloud
         self.vault = vault
         if reversible and vault is None:
             from ogentic_redact.vault import InProcessVault
@@ -83,9 +94,23 @@ class Redactor:
             TypeError: If *text* is not a :class:`str`.
             ValueError: If any span has ``start < 0``, ``end > len(text)``,
                 or ``start >= end``, or if vault storage fails.
+            LocalhostOnlyError: If a cloud recogniser is requested without
+                explicit ``cloud=True`` opt-in.
         """
         if not isinstance(text, str):
             raise TypeError(f"text must be str, got {type(text).__name__!r}")
+
+        if self.cloud:
+            global _cloud_warned
+            if not _cloud_warned:
+                warnings.warn(
+                    "Cloud-assisted recognisers are enabled. Sensitive data may be "
+                    "sent to external services. Disable with cloud=False to enforce "
+                    "on-device-only redaction.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                _cloud_warned = True
 
         spans = spans or []
 
@@ -126,6 +151,8 @@ class Redactor:
 
         mapping_id = None
         if self.reversible:
+            # Invariant: reversible mode always has a vault (see __init__).
+            assert self.vault is not None
             try:
                 mapping_id = self.vault.store(vault_dict, matter_id)
             except Exception as e:
@@ -163,6 +190,8 @@ class Redactor:
                 f"redacted_text must be str, got {type(redacted_text).__name__!r}"
             )
 
+        # Invariant: reversible mode always has a vault (see __init__).
+        assert self.vault is not None
         try:
             vault_dict = self.vault.fetch(mapping_id, matter_id)
         except Exception as e:

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from pathlib import Path
 from typing import Protocol
 
 from ogentic_redact.errors import VaultError, VaultNotFound
@@ -217,7 +216,8 @@ class SQLiteVault:
                     f"mapping_id={mapping_id!r} not found under matter_id={matter_id!r}"
                 )
 
-            return json.loads(row[0])
+            mapping: dict[str, str] = json.loads(row[0])
+            return mapping
         except VaultNotFound:
             raise
         except sqlite3.Error as e:
