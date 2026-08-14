@@ -60,7 +60,9 @@ Seen that way the Rust core is not a weak redactor — it is a **correctly-scope
 
 ### 1. The core owns the redaction algorithm, not detection
 
-`ogentic-redact-core` owns: span → token substitution, token grammar, per-call salt, vault records, `unredact`, and overlap resolution (REDACT-R5). This is pure algorithm — no ML, no model weights, no Python runtime. It is small, fast, embeddable, and is the only form of this library that can target iOS/Swift and `wasm32`.
+`ogentic-redact-core` owns: span → token substitution, token grammar, per-call salt, mapping-store records, `unredact`, and overlap resolution (REDACT-R5). This is pure algorithm — no ML, no model weights, no Python runtime. It is small, fast, embeddable, and is the only form of this library that can target iOS/Swift and `wasm32`.
+
+> **Naming update (OGE-2369, 2026-08-14).** The reversible mapping store is named **`MappingStore`** — Rust `ogentic_redact_core::MappingStore` (`InProcessMappingStore` / `SQLiteMappingStore` in the Python binding), with `Redactor(mapping_store=…)`. It was originally called `Vault`; earlier text in this ADR (and the project-brief quote below) says "vault records" / "vault persistence" / "vault API" from that era. The name **"Vault" is reserved for the separate Ogentic-Vault (OSS) product**, which this store does not depend on — the two only ever shared a name. Renamed in PRs #52 (types) and #53 (parameter).
 
 ### 2. Detection is out of scope for this library
 
