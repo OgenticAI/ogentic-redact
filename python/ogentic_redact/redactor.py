@@ -71,16 +71,16 @@ class Redactor:
     def __init__(
         self,
         reversible: bool = False,
-        vault: MappingStore | None = None,
+        mapping_store: MappingStore | None = None,
         cloud: bool = False,
     ) -> None:
         self.reversible = reversible
         self.cloud = cloud
-        self.vault = vault
-        if reversible and vault is None:
+        self.mapping_store = mapping_store
+        if reversible and mapping_store is None:
             from ogentic_redact.stores import InProcessMappingStore
 
-            self.vault = InProcessMappingStore()
+            self.mapping_store = InProcessMappingStore()
 
     def redact(
         self,
@@ -183,9 +183,9 @@ class Redactor:
         mapping_id = None
         if self.reversible:
             # Invariant: reversible mode always has a vault (see __init__).
-            assert self.vault is not None
+            assert self.mapping_store is not None
             try:
-                mapping_id = self.vault.store(vault_dict, matter_id)
+                mapping_id = self.mapping_store.store(vault_dict, matter_id)
             except Exception as e:
                 raise ValueError("MappingStore storage failed (details hidden)") from e
 
@@ -252,9 +252,9 @@ class Redactor:
             )
 
         # Invariant: reversible mode always has a vault (see __init__).
-        assert self.vault is not None
+        assert self.mapping_store is not None
         try:
-            vault_dict = self.vault.fetch(mapping_id, matter_id)
+            vault_dict = self.mapping_store.fetch(mapping_id, matter_id)
         except Exception as e:
             raise ValueError(
                 f"Unable to restore mapping_id={mapping_id!r} under matter_id={matter_id!r}"
