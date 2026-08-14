@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import warnings
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from ogentic_redact.audit import AuditDetectionEvent, AuditEmitter
+from ogentic_redact.errors import AuditError
+from ogentic_redact.logging import log_structured
 from ogentic_redact.span import Span
 
 if TYPE_CHECKING:
@@ -50,6 +55,12 @@ class Redactor:
         first-use runtime warning. Attempting to use cloud recognisers without
         the flag raises :class:`LocalhostOnlyError`.
 
+    Audit:
+        When an ``audit_emitter`` is passed to :meth:`redact`, one audit
+        detection event is emitted per detected entity type. Emission is
+        fail-closed: if the emitter raises, redaction raises :class:`AuditError`
+        rather than silently completing without an audit record.
+
     Salt semantics:
         A fresh 128-bit random salt is generated on every :meth:`redact`
         call, so the same value produces *different* tokens across calls.
@@ -76,6 +87,10 @@ class Redactor:
         text: str,
         spans: list[Span] | None = None,
         matter_id: str = "",
+        audit_emitter: AuditEmitter | None = None,
+        tenant_id: str = "",
+        request_id: str = "",
+        profile: str = "default",
     ) -> RedactResult:
         """Redact *spans* from *text*.
 
@@ -85,6 +100,14 @@ class Redactor:
                 before replacement; see :meth:`resolve_overlaps`.
             matter_id: Tenant/matter identifier for vault scoping. Defaults to
                 empty string for single-tenant scenarios.
+            audit_emitter: Optional audit event emitter. If provided, an audit
+                detection event is emitted for each detected entity type. If
+                audit emission fails, redaction raises :class:`AuditError`
+                (fail-closed).
+            tenant_id: Tenant identifier for audit context.
+            request_id: Request identifier for audit context.
+            profile: Profile name (e.g. "shield-legal", "default") for audit
+                context.
 
         Returns:
             A :class:`RedactResult` with the redacted text and, in reversible
@@ -96,6 +119,8 @@ class Redactor:
                 or ``start >= end``, or if vault storage fails.
             LocalhostOnlyError: If a cloud recogniser is requested without
                 explicit ``cloud=True`` opt-in.
+            AuditError: If *audit_emitter* is provided and event emission fails
+                (fail-closed).
         """
         if not isinstance(text, str):
             raise TypeError(f"text must be str, got {type(text).__name__!r}")
@@ -121,6 +146,12 @@ class Redactor:
                 )
 
         resolved = self.resolve_overlaps(spans)
+
+        # Audit counts, in document order. `resolved` is sorted by start
+        # ascending, so a Counter over it preserves first-occurrence order —
+        # the replacement loop below runs right-to-left and must not be used
+        # for ordering.
+        entity_counts: dict[str, int] = Counter(span.entity_type for span in resolved)
 
         # Per-call salt: ensures tokens differ across independent calls.
         salt = os.urandom(16).hex()
@@ -158,7 +189,37 @@ class Redactor:
             except Exception as e:
                 raise ValueError("Vault storage failed (details hidden)") from e
 
-        return RedactResult(text=text, vault={}, mapping_id=mapping_id)
+        result = RedactResult(text=text, vault={}, mapping_id=mapping_id)
+
+        if audit_emitter is not None:
+            mode = "reversible" if self.reversible else "one-way"
+            for entity_type, count in entity_counts.items():
+                event = AuditDetectionEvent(
+                    entity_type=entity_type,
+                    mode=mode,
+                    profile=profile,
+                    count=count,
+                    mapping_id=mapping_id,
+                    tenant_id=tenant_id,
+                    request_id=request_id,
+                )
+                try:
+                    audit_emitter.emit(event)
+                except Exception as e:
+                    log_structured(
+                        logging.ERROR,
+                        "audit event emission failed",
+                        tenant_id=tenant_id,
+                        request_id=request_id,
+                        op="redact",
+                        entity_type=entity_type,
+                        error=str(e),
+                    )
+                    raise AuditError(
+                        "audit event recording failed; redaction not completed"
+                    ) from e
+
+        return result
 
     def unredact(
         self,
