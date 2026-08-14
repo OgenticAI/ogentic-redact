@@ -84,8 +84,8 @@ def test_tokens_differ_across_calls(text: str, entity_type: str) -> None:
     r = Redactor(reversible=True)
     result_a = r.redact(text, [span])
     result_b = r.redact(text, [span])
-    vault_a = r.vault.fetch(result_a.mapping_id, "")
-    vault_b = r.vault.fetch(result_b.mapping_id, "")
+    vault_a = r.mapping_store.fetch(result_a.mapping_id, "")
+    vault_b = r.mapping_store.fetch(result_b.mapping_id, "")
     assert set(vault_a.keys()).isdisjoint(set(vault_b.keys()))
 
 
@@ -96,7 +96,7 @@ def test_tokens_differ_across_three_calls(text: str, entity_type: str) -> None:
     span = Span(start=0, end=len(text), entity_type=entity_type, group=0)
     r = Redactor(reversible=True)
     results = [r.redact(text, [span]) for _ in range(3)]
-    sets = [set(r.vault.fetch(res.mapping_id, "").keys()) for res in results]
+    sets = [set(r.mapping_store.fetch(res.mapping_id, "").keys()) for res in results]
     # Each pair must be disjoint
     assert sets[0].isdisjoint(sets[1])
     assert sets[0].isdisjoint(sets[2])
@@ -130,7 +130,7 @@ def test_within_call_token_stability(value: str, sep: str, entity_type: str) -> 
     )
     r = Redactor(reversible=True)
     result = r.redact(text, [span1, span2])
-    vault = r.vault.fetch(result.mapping_id, "")
+    vault = r.mapping_store.fetch(result.mapping_id, "")
     # Same value and entity_type → one unique vault entry
     assert len(vault) == 1
     (token,) = vault.keys()
@@ -148,7 +148,7 @@ def test_within_call_vault_maps_to_original(value: str, entity_type: str) -> Non
     span = Span(start=0, end=len(value), entity_type=entity_type, group=0)
     r = Redactor(reversible=True)
     result = r.redact(value, [span])
-    vault = r.vault.fetch(result.mapping_id, "")
+    vault = r.mapping_store.fetch(result.mapping_id, "")
     assert len(vault) == 1
     assert next(iter(vault.values())) == value
 
@@ -304,8 +304,8 @@ def test_unredact_raises_when_not_reversible() -> None:
 def test_unredact_raises_on_missing_token() -> None:
     """`unredact()` raises an error when a vault token is not in the text."""
     from ogentic_redact.stores import InProcessMappingStore
-    r = Redactor(reversible=True, vault=InProcessMappingStore())
-    mapping_id = r.vault.store({"[RTKN_deadbeef0000]": "secret"}, "")
+    r = Redactor(reversible=True, mapping_store=InProcessMappingStore())
+    mapping_id = r.mapping_store.store({"[RTKN_deadbeef0000]": "secret"}, "")
     with pytest.raises(KeyError):
         r.unredact("no tokens here", mapping_id)
 
@@ -320,8 +320,8 @@ def test_unredact_raises_on_non_string_input() -> None:
 def test_unredact_empty_vault_returns_text_unchanged() -> None:
     """`unredact()` with an empty vault returns the text unchanged."""
     from ogentic_redact.stores import InProcessMappingStore
-    r = Redactor(reversible=True, vault=InProcessMappingStore())
-    mapping_id = r.vault.store({}, "")
+    r = Redactor(reversible=True, mapping_store=InProcessMappingStore())
+    mapping_id = r.mapping_store.store({}, "")
     assert r.unredact("some text", mapping_id) == "some text"
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from ogentic_redact import Redactor, RedactResult, Span, InProcessMappingStore, SQLiteMappingStore
+from ogentic_redact import InProcessMappingStore, Redactor, RedactResult, Span, SQLiteMappingStore
 from ogentic_redact.errors import MappingNotFound
 
 
@@ -31,13 +31,13 @@ class TestAC1StoreStorage:
         assert result.vault == {}
 
     def test_mapping_stored_in_vault(self) -> None:
-        vault = InProcessMappingStore()
-        redactor = Redactor(reversible=True, vault=vault)
+        store = InProcessMappingStore()
+        redactor = Redactor(reversible=True, mapping_store=store)
         spans = [Span(start=0, end=5, entity_type="EMAIL")]
 
         result = redactor.redact("admin@example.com is the email", spans, matter_id="test")
 
-        stored_mapping = vault.fetch(result.mapping_id, "test")
+        stored_mapping = store.fetch(result.mapping_id, "test")
         assert len(stored_mapping) > 0
         assert all(token.startswith("[RTKN_") for token in stored_mapping.keys())
 
@@ -93,8 +93,8 @@ class TestAC3MatterScoping:
             redactor.unredact(result_a.text, result_a.mapping_id, matter_id="matter_b")
 
     def test_different_matters_different_mappings(self) -> None:
-        vault = InProcessMappingStore()
-        redactor = Redactor(reversible=True, vault=vault)
+        store = InProcessMappingStore()
+        redactor = Redactor(reversible=True, mapping_store=store)
         spans = [Span(start=0, end=5, entity_type="EMAIL")]
 
         result_a = redactor.redact("admin@example.com", spans, matter_id="matter_a")
@@ -102,8 +102,8 @@ class TestAC3MatterScoping:
 
         assert result_a.mapping_id != result_b.mapping_id
 
-        mapping_a = vault.fetch(result_a.mapping_id, "matter_a")
-        mapping_b = vault.fetch(result_b.mapping_id, "matter_b")
+        mapping_a = store.fetch(result_a.mapping_id, "matter_a")
+        mapping_b = store.fetch(result_b.mapping_id, "matter_b")
 
         # Same source value → same recovered original in both matters, but the
         # per-call salt (OGE-1209) makes the token keys differ across calls.
@@ -112,7 +112,7 @@ class TestAC3MatterScoping:
 
         # Matter isolation: a's mapping cannot be fetched under b's matter_id.
         with pytest.raises(MappingNotFound):
-            vault.fetch(result_a.mapping_id, "matter_b")
+            store.fetch(result_a.mapping_id, "matter_b")
 
     def test_default_empty_matter_id(self) -> None:
         redactor = Redactor(reversible=True)
@@ -164,12 +164,12 @@ class TestAC5StoreInterface:
     def test_in_process_vault_default(self) -> None:
         redactor = Redactor(reversible=True)
 
-        assert redactor.vault is not None
-        assert isinstance(redactor.vault, InProcessMappingStore)
+        assert redactor.mapping_store is not None
+        assert isinstance(redactor.mapping_store, InProcessMappingStore)
 
     def test_custom_vault_integration(self) -> None:
-        vault = SQLiteMappingStore()
-        redactor = Redactor(reversible=True, vault=vault)
+        store = SQLiteMappingStore()
+        redactor = Redactor(reversible=True, mapping_store=store)
         spans = [Span(start=0, end=5, entity_type="EMAIL")]
 
         result = redactor.redact("admin@example.com", spans, matter_id="test")
@@ -180,10 +180,10 @@ class TestAC5StoreInterface:
     def test_vault_interface_contract(self) -> None:
         redactor = Redactor(reversible=True)
 
-        assert hasattr(redactor.vault, "store")
-        assert hasattr(redactor.vault, "fetch")
-        assert callable(redactor.vault.store)
-        assert callable(redactor.vault.fetch)
+        assert hasattr(redactor.mapping_store, "store")
+        assert hasattr(redactor.mapping_store, "fetch")
+        assert callable(redactor.mapping_store.store)
+        assert callable(redactor.mapping_store.fetch)
 
 
 class TestBackwardsCompatibility:
@@ -238,7 +238,7 @@ class TestErrorHandling:
             def fetch(self, mapping_id: str, matter_id: str) -> dict[str, str]:
                 return {}
 
-        redactor = Redactor(reversible=True, vault=FailingStore())
+        redactor = Redactor(reversible=True, mapping_store=FailingStore())
         spans = [Span(start=0, end=5, entity_type="EMAIL")]
 
         with pytest.raises(ValueError, match="MappingStore storage failed"):

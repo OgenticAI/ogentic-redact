@@ -37,7 +37,7 @@ pub const OPAQUE_LABEL: &str = "Redacted";
 /// Mirrors `ogentic-shield`'s `CATEGORY_LABEL_TO_ENTITY_TYPES`
 /// (`src/ogentic_shield/redaction.py`). The mapping is many-to-one: several
 /// entity types collapse to one coarser label (e.g. `EXECUTIVE_NAME` →
-/// `Person`), which reduces category leakage. The vault always stores the
+/// `Person`), which reduces category leakage. The mapping store always stores the
 /// exact entity type; only the token shows the label.
 ///
 /// Kept in sync with `conformance/category-labels.json` by a parity test.
@@ -105,7 +105,7 @@ fn fallback_label(entity_type: &str) -> String {
 }
 
 /// Normalize a value into its grouping form: collapse runs of ASCII whitespace
-/// to a single space, trim, and lowercase. The vault stores the exact original
+/// to a single space, trim, and lowercase. The mapping store stores the exact original
 /// separately — this form only decides which spans share a token.
 pub fn canonicalize(value: &str) -> String {
     let mut out = String::with_capacity(value.len());

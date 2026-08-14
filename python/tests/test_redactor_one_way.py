@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import warnings
 
-import pytest
-
 from ogentic_redact import LocalhostOnlyError
-from ogentic_redact.redactor import Redactor, _cloud_warned
+from ogentic_redact.redactor import Redactor
 from ogentic_redact.span import Span
 
 
@@ -45,7 +43,7 @@ class TestOneWayIrreversible:
         # returns an opaque mapping_id; RedactResult.vault stays empty.
         assert result.mapping_id is not None
         assert result.vault == {}
-        mapping = redactor.vault.fetch(result.mapping_id, "")
+        mapping = redactor.mapping_store.fetch(result.mapping_id, "")
         assert any("alice@example.com" in v for v in mapping.values())
 
 
