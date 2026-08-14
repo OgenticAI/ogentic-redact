@@ -41,7 +41,7 @@ class TestOneWayIrreversible:
             text,
             [Span(start=12, end=29, entity_type="EMAIL_ADDRESS", group=0)],
         )
-        # Reversible mode stores the mapping in the Vault (never inline), and
+        # Reversible mode stores the mapping in the MappingStore (never inline), and
         # returns an opaque mapping_id; RedactResult.vault stays empty.
         assert result.mapping_id is not None
         assert result.vault == {}

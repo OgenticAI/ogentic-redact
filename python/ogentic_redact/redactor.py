@@ -16,7 +16,7 @@ from ogentic_redact.logging import log_structured
 from ogentic_redact.span import Span
 
 if TYPE_CHECKING:
-    from ogentic_redact.vault import Vault
+    from ogentic_redact.stores import MappingStore
 
 _cloud_warned: bool = False
 
@@ -46,7 +46,7 @@ class Redactor:
       label, e.g. ``[EMAIL]``.  The original value cannot be recovered.
     * **Reversible** (``reversible=True``): each span is replaced with a
       salted opaque token, e.g. ``[RTKN_3a7f9c12ab01]``, and the mapping is
-      stored in a separate Vault. An opaque mapping_id is returned; the
+      stored in a separate MappingStore. An opaque mapping_id is returned; the
       original plaintext mapping is never returned inline.
 
     Cloud recognisers:
@@ -71,16 +71,16 @@ class Redactor:
     def __init__(
         self,
         reversible: bool = False,
-        vault: Vault | None = None,
+        vault: MappingStore | None = None,
         cloud: bool = False,
     ) -> None:
         self.reversible = reversible
         self.cloud = cloud
         self.vault = vault
         if reversible and vault is None:
-            from ogentic_redact.vault import InProcessVault
+            from ogentic_redact.stores import InProcessMappingStore
 
-            self.vault = InProcessVault()
+            self.vault = InProcessMappingStore()
 
     def redact(
         self,
@@ -187,7 +187,7 @@ class Redactor:
             try:
                 mapping_id = self.vault.store(vault_dict, matter_id)
             except Exception as e:
-                raise ValueError("Vault storage failed (details hidden)") from e
+                raise ValueError("MappingStore storage failed (details hidden)") from e
 
         result = RedactResult(text=text, vault={}, mapping_id=mapping_id)
 

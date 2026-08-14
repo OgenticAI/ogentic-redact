@@ -1,15 +1,15 @@
-"""Tests for Redactor integration with Vault (OGE-1234 acceptance criteria)."""
+"""Tests for Redactor integration with MappingStore (OGE-1234 acceptance criteria)."""
 
 from __future__ import annotations
 
 import pytest
 
-from ogentic_redact import Redactor, RedactResult, Span, InProcessVault, SQLiteVault
-from ogentic_redact.errors import VaultNotFound
+from ogentic_redact import Redactor, RedactResult, Span, InProcessMappingStore, SQLiteMappingStore
+from ogentic_redact.errors import MappingNotFound
 
 
-class TestAC1VaultStorage:
-    """AC1: Reversible redact() stores mapping in Vault and returns mapping_id."""
+class TestAC1StoreStorage:
+    """AC1: Reversible redact() stores mapping in MappingStore and returns mapping_id."""
 
     def test_redact_reversible_returns_mapping_id(self) -> None:
         redactor = Redactor(reversible=True)
@@ -31,7 +31,7 @@ class TestAC1VaultStorage:
         assert result.vault == {}
 
     def test_mapping_stored_in_vault(self) -> None:
-        vault = InProcessVault()
+        vault = InProcessMappingStore()
         redactor = Redactor(reversible=True, vault=vault)
         spans = [Span(start=0, end=5, entity_type="EMAIL")]
 
@@ -51,8 +51,8 @@ class TestAC1VaultStorage:
         assert result.vault == {}
 
 
-class TestAC2VaultFetch:
-    """AC2: unredact() fetches mapping from Vault by mapping_id."""
+class TestAC2StoreFetch:
+    """AC2: unredact() fetches mapping from MappingStore by mapping_id."""
 
     def test_unredact_by_mapping_id(self) -> None:
         redactor = Redactor(reversible=True)
@@ -93,7 +93,7 @@ class TestAC3MatterScoping:
             redactor.unredact(result_a.text, result_a.mapping_id, matter_id="matter_b")
 
     def test_different_matters_different_mappings(self) -> None:
-        vault = InProcessVault()
+        vault = InProcessMappingStore()
         redactor = Redactor(reversible=True, vault=vault)
         spans = [Span(start=0, end=5, entity_type="EMAIL")]
 
@@ -111,7 +111,7 @@ class TestAC3MatterScoping:
         assert set(mapping_a.keys()).isdisjoint(mapping_b.keys())
 
         # Matter isolation: a's mapping cannot be fetched under b's matter_id.
-        with pytest.raises(VaultNotFound):
+        with pytest.raises(MappingNotFound):
             vault.fetch(result_a.mapping_id, "matter_b")
 
     def test_default_empty_matter_id(self) -> None:
@@ -158,17 +158,17 @@ class TestAC4NoPlaintextRetention:
         assert restored == "admin@example.com"
 
 
-class TestAC5VaultInterface:
-    """AC5: Vault interface is store-agnostic; defaults work out-of-box."""
+class TestAC5StoreInterface:
+    """AC5: MappingStore interface is store-agnostic; defaults work out-of-box."""
 
     def test_in_process_vault_default(self) -> None:
         redactor = Redactor(reversible=True)
 
         assert redactor.vault is not None
-        assert isinstance(redactor.vault, InProcessVault)
+        assert isinstance(redactor.vault, InProcessMappingStore)
 
     def test_custom_vault_integration(self) -> None:
-        vault = SQLiteVault()
+        vault = SQLiteMappingStore()
         redactor = Redactor(reversible=True, vault=vault)
         spans = [Span(start=0, end=5, entity_type="EMAIL")]
 
@@ -231,15 +231,15 @@ class TestErrorHandling:
             redactor.unredact(result.text, result.mapping_id, matter_id="wrong_matter")
 
     def test_vault_storage_error_raises_valueerror(self) -> None:
-        class FailingVault:
+        class FailingStore:
             def store(self, mapping: dict[str, str], matter_id: str) -> str:
                 raise RuntimeError("Storage failed")
 
             def fetch(self, mapping_id: str, matter_id: str) -> dict[str, str]:
                 return {}
 
-        redactor = Redactor(reversible=True, vault=FailingVault())
+        redactor = Redactor(reversible=True, vault=FailingStore())
         spans = [Span(start=0, end=5, entity_type="EMAIL")]
 
-        with pytest.raises(ValueError, match="Vault storage failed"):
+        with pytest.raises(ValueError, match="MappingStore storage failed"):
             redactor.redact("admin@example.com", spans, matter_id="test")

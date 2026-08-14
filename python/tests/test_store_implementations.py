@@ -1,4 +1,4 @@
-"""Tests for Vault implementations (InProcessVault, SQLiteVault)."""
+"""Tests for MappingStore implementations (InProcessMappingStore, SQLiteMappingStore)."""
 
 from __future__ import annotations
 
@@ -6,15 +6,15 @@ import pytest
 import tempfile
 from pathlib import Path
 
-from ogentic_redact.errors import VaultNotFound, VaultError
-from ogentic_redact.vault import InProcessVault, SQLiteVault
+from ogentic_redact.errors import MappingNotFound, MappingStoreError
+from ogentic_redact.stores import InProcessMappingStore, SQLiteMappingStore
 
 
-class TestInProcessVault:
-    """Tests for InProcessVault implementation."""
+class TestInProcessMappingStore:
+    """Tests for InProcessMappingStore implementation."""
 
     def test_store_and_fetch_basic(self) -> None:
-        vault = InProcessVault()
+        vault = InProcessMappingStore()
         mapping = {"[RTKN_abc123]": "secret_value"}
 
         mapping_id = vault.store(mapping, "matter_1")
@@ -25,7 +25,7 @@ class TestInProcessVault:
         assert retrieved == mapping
 
     def test_store_creates_copy(self) -> None:
-        vault = InProcessVault()
+        vault = InProcessMappingStore()
         original_mapping = {"[RTKN_abc]": "secret"}
 
         vault.store(original_mapping, "matter_1")
@@ -36,7 +36,7 @@ class TestInProcessVault:
         assert retrieved["[RTKN_abc]"] == "secret"
 
     def test_fetch_returns_copy(self) -> None:
-        vault = InProcessVault()
+        vault = InProcessMappingStore()
         original_mapping = {"[RTKN_abc]": "secret"}
         mapping_id = vault.store(original_mapping, "matter_1")
 
@@ -47,13 +47,13 @@ class TestInProcessVault:
         assert retrieved_again["[RTKN_abc]"] == "secret"
 
     def test_fetch_nonexistent_mapping_raises(self) -> None:
-        vault = InProcessVault()
+        vault = InProcessMappingStore()
 
-        with pytest.raises(VaultNotFound):
+        with pytest.raises(MappingNotFound):
             vault.fetch("nonexistent_id", "matter_1")
 
     def test_per_matter_isolation(self) -> None:
-        vault = InProcessVault()
+        vault = InProcessMappingStore()
         mapping_a = {"[RTKN_a]": "secret_a"}
         mapping_b = {"[RTKN_b]": "secret_b"}
 
@@ -66,14 +66,14 @@ class TestInProcessVault:
         retrieved_b = vault.fetch(mapping_id_b, "matter_b")
         assert retrieved_b == mapping_b
 
-        with pytest.raises(VaultNotFound):
+        with pytest.raises(MappingNotFound):
             vault.fetch(mapping_id_a, "matter_b")
 
-        with pytest.raises(VaultNotFound):
+        with pytest.raises(MappingNotFound):
             vault.fetch(mapping_id_b, "matter_a")
 
     def test_multiple_mappings_per_matter(self) -> None:
-        vault = InProcessVault()
+        vault = InProcessMappingStore()
         mapping1 = {"[RTKN_1]": "secret1"}
         mapping2 = {"[RTKN_2]": "secret2"}
 
@@ -85,11 +85,11 @@ class TestInProcessVault:
         assert vault.fetch(mapping_id_2, "matter_1") == mapping2
 
 
-class TestSQLiteVault:
-    """Tests for SQLiteVault implementation."""
+class TestSQLiteMappingStore:
+    """Tests for SQLiteMappingStore implementation."""
 
     def test_store_and_fetch_basic(self) -> None:
-        vault = SQLiteVault()
+        vault = SQLiteMappingStore()
         mapping = {"[RTKN_abc123]": "secret_value"}
 
         mapping_id = vault.store(mapping, "matter_1")
@@ -103,22 +103,22 @@ class TestSQLiteVault:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = str(Path(tmpdir) / "vault.db")
 
-            vault1 = SQLiteVault(db_path)
+            vault1 = SQLiteMappingStore(db_path)
             mapping = {"[RTKN_abc]": "persistent_secret"}
             mapping_id = vault1.store(mapping, "matter_1")
 
-            vault2 = SQLiteVault(db_path)
+            vault2 = SQLiteMappingStore(db_path)
             retrieved = vault2.fetch(mapping_id, "matter_1")
             assert retrieved == mapping
 
     def test_fetch_nonexistent_mapping_raises(self) -> None:
-        vault = SQLiteVault()
+        vault = SQLiteMappingStore()
 
-        with pytest.raises(VaultNotFound):
+        with pytest.raises(MappingNotFound):
             vault.fetch("nonexistent_id", "matter_1")
 
     def test_per_matter_isolation(self) -> None:
-        vault = SQLiteVault()
+        vault = SQLiteMappingStore()
         mapping_a = {"[RTKN_a]": "secret_a"}
         mapping_b = {"[RTKN_b]": "secret_b"}
 
@@ -131,14 +131,14 @@ class TestSQLiteVault:
         retrieved_b = vault.fetch(mapping_id_b, "matter_b")
         assert retrieved_b == mapping_b
 
-        with pytest.raises(VaultNotFound):
+        with pytest.raises(MappingNotFound):
             vault.fetch(mapping_id_a, "matter_b")
 
-        with pytest.raises(VaultNotFound):
+        with pytest.raises(MappingNotFound):
             vault.fetch(mapping_id_b, "matter_a")
 
     def test_multiple_mappings_per_matter(self) -> None:
-        vault = SQLiteVault()
+        vault = SQLiteMappingStore()
         mapping1 = {"[RTKN_1]": "secret1"}
         mapping2 = {"[RTKN_2]": "secret2"}
 
@@ -150,7 +150,7 @@ class TestSQLiteVault:
         assert vault.fetch(mapping_id_2, "matter_1") == mapping2
 
     def test_empty_matter_id(self) -> None:
-        vault = SQLiteVault()
+        vault = SQLiteMappingStore()
         mapping = {"[RTKN_test]": "value"}
 
         mapping_id = vault.store(mapping, "")
@@ -158,7 +158,7 @@ class TestSQLiteVault:
         assert retrieved == mapping
 
     def test_special_characters_in_mapping(self) -> None:
-        vault = SQLiteVault()
+        vault = SQLiteMappingStore()
         mapping = {
             "[RTKN_1]": "value with\nnewlines",
             "[RTKN_2]": 'value with "quotes"',
