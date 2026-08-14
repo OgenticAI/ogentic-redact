@@ -34,7 +34,7 @@ response is the clearest way to communicate the design intent to an evaluator.
 
 ## 2. CLI surface
 
-The CLI is a Wave 2 target. Today the entry point is a stub. The intended surface is:
+Implemented in `crates/ogentic-redact-cli` (OGE-1266). The surface is:
 
 **Forward redaction (write vault to file):**
 
@@ -42,10 +42,12 @@ The CLI is a Wave 2 target. Today the entry point is a stub. The intended surfac
 ogentic-redact <input-file> --mapping <out.json>
 ```
 
-- Requires `Redactor(reversible=True)` internally. Without the flag the vault is not
-  written and the `--mapping` output file is not produced.
-- Writes the redacted text to stdout (or `--output <file>` when added).
-- Writes the mapping vault to `<out.json>`.
+- `<input-file>` may be `-` to read from stdin.
+- Writes the redacted text to stdout, byte-exactly (no trailing newline added), so
+  the round-trip below reproduces the input.
+- Writes the mapping vault to `<out.json>` — a versioned `token → original` table.
+- Without `--mapping` the redaction is one-way: the vault is not written and the
+  original values cannot be recovered.
 
 **Reverse redaction (restore from vault):**
 
@@ -53,11 +55,15 @@ ogentic-redact <input-file> --mapping <out.json>
 ogentic-redact unredact <redacted-file> --mapping <in.json>
 ```
 
-- Reads the vault from `<in.json>`.
-- Writes the restored text to stdout.
+- Reads the vault from `<in.json>` and restores the original tokens.
+- Writes the restored text to stdout. A `redact` then `unredact` round-trip
+  reproduces the input byte-for-byte.
 
-Both commands are on-device by default — no network calls. Cloud-assisted recognisers
-are opt-in via the `[cloud]` extra and emit a runtime warning on first use.
+Both commands are on-device by default — no network calls. Detection is the core
+byte-scanner (EMAIL / PHONE / US_SSN), a documented development convenience;
+production spans come from `ogentic-shield` (ADR-0002). `--cloud` opts in to
+cloud-assisted recognisers and emits a first-use runtime warning; it does not yet
+change detection (that path lands with OGE-1230).
 
 ---
 

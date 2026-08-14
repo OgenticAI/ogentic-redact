@@ -588,6 +588,8 @@ dependencies = [
  "anyhow",
  "clap",
  "ogentic-redact-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
