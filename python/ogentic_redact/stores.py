@@ -1,4 +1,4 @@
-"""Vault interface and implementations for storing reversible redaction mappings."""
+"""MappingStore interface and implementations for storing reversible redaction mappings."""
 
 from __future__ import annotations
 
@@ -8,13 +8,13 @@ import threading
 import uuid
 from typing import Protocol
 
-from ogentic_redact.errors import VaultError, VaultNotFound
+from ogentic_redact.errors import MappingNotFound, MappingStoreError
 
 
-class Vault(Protocol):
+class MappingStore(Protocol):
     """Abstract vault for storing and retrieving reversible redaction mappings.
 
-    A Vault is responsible for persisting token→original mappings, scoped by
+    A MappingStore is responsible for persisting token→original mappings, scoped by
     matter_id (tenant identifier). Implementations may use in-process memory,
     local files, or external services.
     """
@@ -34,7 +34,7 @@ class Vault(Protocol):
             opaque mapping_id string (UUID recommended).
 
         Raises:
-            VaultError if storage fails.
+            MappingStoreError if storage fails.
         """
         ...
 
@@ -53,13 +53,13 @@ class Vault(Protocol):
             The token→original dict.
 
         Raises:
-            VaultNotFound if mapping_id does not exist under matter_id.
-            VaultError for other failures (storage access, etc).
+            MappingNotFound if mapping_id does not exist under matter_id.
+            MappingStoreError for other failures (storage access, etc).
         """
         ...
 
 
-class InProcessVault:
+class InProcessMappingStore:
     """Development/demo vault: mappings in memory, scoped per matter.
 
     Mappings survive only as long as the process lives. Acceptable for
@@ -104,16 +104,16 @@ class InProcessVault:
             The token→original dict (copy to prevent external mutation).
 
         Raises:
-            VaultNotFound if not found under matter_id.
+            MappingNotFound if not found under matter_id.
         """
         if matter_id not in self._store or mapping_id not in self._store[matter_id]:
-            raise VaultNotFound(
+            raise MappingNotFound(
                 f"mapping_id={mapping_id!r} not found under matter_id={matter_id!r}"
             )
         return self._store[matter_id][mapping_id].copy()
 
 
-class SQLiteVault:
+class SQLiteMappingStore:
     """On-device SQLite vault, survives process restarts.
 
     Mappings are persisted to a local SQLite file, fully on-device,
@@ -122,7 +122,7 @@ class SQLiteVault:
     """
 
     def __init__(self, db_path: str | None = None) -> None:
-        """Initialize SQLiteVault.
+        """Initialize SQLiteMappingStore.
 
         Args:
             db_path: Path to a SQLite database file. If None, an in-memory
@@ -156,7 +156,7 @@ class SQLiteVault:
                 )
                 self._conn.commit()
         except sqlite3.Error as e:
-            raise VaultError(f"Failed to initialize vault schema: {e}") from e
+            raise MappingStoreError(f"Failed to initialize vault schema: {e}") from e
 
     def close(self) -> None:
         """Close the underlying connection; the vault is unusable afterwards."""
@@ -177,7 +177,7 @@ class SQLiteVault:
             opaque mapping_id (UUID).
 
         Raises:
-            VaultError on storage failure.
+            MappingStoreError on storage failure.
         """
         mapping_id = str(uuid.uuid4())
         mapping_json = json.dumps(mapping)
@@ -193,7 +193,7 @@ class SQLiteVault:
                 )
                 self._conn.commit()
         except sqlite3.Error as e:
-            raise VaultError(f"Failed to store mapping in vault: {e}") from e
+            raise MappingStoreError(f"Failed to store mapping in vault: {e}") from e
 
         return mapping_id
 
@@ -212,8 +212,8 @@ class SQLiteVault:
             The token→original dict.
 
         Raises:
-            VaultNotFound if not found under matter_id.
-            VaultError on storage failure.
+            MappingNotFound if not found under matter_id.
+            MappingStoreError on storage failure.
         """
         try:
             with self._lock:
@@ -227,15 +227,15 @@ class SQLiteVault:
                 row = cursor.fetchone()
 
             if row is None:
-                raise VaultNotFound(
+                raise MappingNotFound(
                     f"mapping_id={mapping_id!r} not found under matter_id={matter_id!r}"
                 )
 
             mapping: dict[str, str] = json.loads(row[0])
             return mapping
-        except VaultNotFound:
+        except MappingNotFound:
             raise
         except sqlite3.Error as e:
-            raise VaultError(f"Failed to fetch mapping from vault: {e}") from e
+            raise MappingStoreError(f"Failed to fetch mapping from vault: {e}") from e
         except json.JSONDecodeError as e:
-            raise VaultError(f"Corrupted mapping data in vault: {e}") from e
+            raise MappingStoreError(f"Corrupted mapping data in vault: {e}") from e

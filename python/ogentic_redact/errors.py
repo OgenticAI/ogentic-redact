@@ -5,9 +5,9 @@ from __future__ import annotations
 __all__ = [
     "AuditError",
     "LocalhostOnlyError",
+    "MappingNotFound",
+    "MappingStoreError",
     "RedactError",
-    "VaultError",
-    "VaultNotFound",
 ]
 
 
@@ -15,11 +15,11 @@ class RedactError(Exception):
     """Base exception for redaction errors."""
 
 
-class VaultError(RedactError):
+class MappingStoreError(RedactError):
     """Base exception for vault operations."""
 
 
-class VaultNotFound(VaultError):
+class MappingNotFound(MappingStoreError):
     """Mapping not found under the given matter_id."""
 
 

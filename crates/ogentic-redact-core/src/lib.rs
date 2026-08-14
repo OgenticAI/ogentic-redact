@@ -1,15 +1,15 @@
 //! `ogentic-redact-core` — real-time, on-device sensitive-content redaction.
 //!
 //! This crate is the heart of the `ogentic-redact` library. It exposes the
-//! primary [`redact`] and [`unredact`] entry points, along with the [`Vault`]
+//! primary [`redact`] and [`unredact`] entry points, along with the [`MappingStore`]
 //! that stores reversible token mappings entirely on-device.
 //!
 //! # Quick start
 //!
 //! ```rust
-//! use ogentic_redact_core::{Vault, RedactMode, redact, unredact};
+//! use ogentic_redact_core::{MappingStore, RedactMode, redact, unredact};
 //!
-//! let vault = Vault::new();
+//! let vault = MappingStore::new();
 //! let text = "Contact alice@example.com for details.";
 //! let (redacted, mapping_id) = redact(text, "default", RedactMode::Reversible, Some(&vault))
 //!     .expect("redact failed");
@@ -52,7 +52,7 @@ pub enum RedactError {
 
     /// Reversible mode was requested but no vault reference was supplied.
     #[error("reversible mode requires a vault reference")]
-    VaultRequired,
+    MappingStoreRequired,
 
     /// The supplied `mapping_id` does not exist in the vault.
     #[error("unknown mapping id: {mapping_id:?}")]
@@ -73,7 +73,7 @@ pub enum RedactMode {
     /// Store a token→original mapping in the vault and return a `mapping_id`.
     ///
     /// Requires `vault: Some(&vault)` in [`redact`]; returns
-    /// [`RedactError::VaultRequired`] otherwise.
+    /// [`RedactError::MappingStoreRequired`] otherwise.
     Reversible,
     /// Replace entities with lossy tokens. No mapping is written and no
     /// `mapping_id` is returned.
@@ -100,7 +100,7 @@ pub struct Span {
 }
 
 // ---------------------------------------------------------------------------
-// Vault
+// MappingStore
 // ---------------------------------------------------------------------------
 
 /// In-process, on-device store for reversible token mappings.
@@ -110,12 +110,12 @@ pub struct Span {
 /// [`unredact`] looks up the table by `mapping_id` to restore the original
 /// text.
 ///
-/// The vault survives only for the lifetime of the process (demo-design §5
+/// The store survives only for the lifetime of the process (demo-design §5
 /// option a — zero external dependencies, on-device by default). It is
 /// `Send + Sync` and may be shared across threads.
 #[derive(Debug, Default)]
-pub struct Vault {
-    mappings: Mutex<HashMap<String, VaultRecord>>,
+pub struct MappingStore {
+    mappings: Mutex<HashMap<String, MappingRecord>>,
     counter: AtomicU64,
 }
 
@@ -125,15 +125,15 @@ pub struct Vault {
 /// for each emitted token, the exact original and the `label`/`canonical`
 /// grouping form it was derived from.
 #[derive(Debug, Clone)]
-struct VaultRecord {
+struct MappingRecord {
     #[allow(dead_code)] // retained for auditing / future vault-export (OGE-1243)
     call_salt: [u8; token::SALT_LEN],
-    entries: HashMap<String, VaultEntry>,
+    entries: HashMap<String, MappingEntry>,
 }
 
-/// A single token→original mapping within a [`VaultRecord`].
+/// A single token→original mapping within a [`MappingRecord`].
 #[derive(Debug, Clone)]
-struct VaultEntry {
+struct MappingEntry {
     original: String,
     #[allow(dead_code)] // retained for auditing / future vault-export (OGE-1243)
     label: String,
@@ -141,14 +141,14 @@ struct VaultEntry {
     canonical: String,
 }
 
-impl Vault {
+impl MappingStore {
     /// Create a new, empty vault.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Store a redaction record and return its fresh `mapping_id`.
-    fn put(&self, record: VaultRecord) -> String {
+    fn put(&self, record: MappingRecord) -> String {
         let id = self.next_id();
         self.mappings
             .lock()
@@ -158,7 +158,7 @@ impl Vault {
     }
 
     /// Retrieve a clone of the record for `mapping_id`, or `None` if absent.
-    fn get(&self, mapping_id: &str) -> Option<VaultRecord> {
+    fn get(&self, mapping_id: &str) -> Option<MappingRecord> {
         self.mappings
             .lock()
             .expect("vault mutex poisoned")
@@ -273,9 +273,9 @@ fn assign_tokens<'a>(
     text: &'a str,
     spans: &'a [Span],
     call_salt: &[u8; token::SALT_LEN],
-) -> (Vec<(&'a Span, String)>, HashMap<String, VaultEntry>) {
+) -> (Vec<(&'a Span, String)>, HashMap<String, MappingEntry>) {
     let mut per_span: Vec<(&Span, String)> = Vec::with_capacity(spans.len());
-    let mut entries: HashMap<String, VaultEntry> = HashMap::new();
+    let mut entries: HashMap<String, MappingEntry> = HashMap::new();
     let mut assigner = TokenAssigner::default();
 
     for span in spans {
@@ -283,7 +283,7 @@ fn assign_tokens<'a>(
         let label = token::label_for(&span.entity_type);
         let canonical = token::canonicalize(original);
         let tok = assigner.assign(&label, &canonical, call_salt);
-        entries.entry(tok.clone()).or_insert_with(|| VaultEntry {
+        entries.entry(tok.clone()).or_insert_with(|| MappingEntry {
             original: original.to_owned(),
             label,
             canonical,
@@ -353,13 +353,13 @@ impl TokenAssigner {
 /// # Errors
 ///
 /// * [`RedactError::UnknownProfile`] — `profile` is not on the allow-list.
-/// * [`RedactError::VaultRequired`]  — reversible mode requested without a
+/// * [`RedactError::MappingStoreRequired`]  — reversible mode requested without a
 ///   vault.
 pub fn redact(
     text: &str,
     profile: &str,
     mode: RedactMode,
-    vault: Option<&Vault>,
+    vault: Option<&MappingStore>,
 ) -> Result<(String, Option<String>), RedactError> {
     // Gate 1: profile allow-list — reject before any processing.
     if !KNOWN_PROFILES.contains(&profile) {
@@ -370,7 +370,7 @@ pub fn redact(
 
     // Gate 2: vault required for reversible mode.
     if mode == RedactMode::Reversible && vault.is_none() {
-        return Err(RedactError::VaultRequired);
+        return Err(RedactError::MappingStoreRequired);
     }
 
     // Fresh per-call salt: the discriminator derives from it, so the same value
@@ -393,10 +393,10 @@ pub fn redact(
     // Reversible path: persist the record (salt + entries) to the vault.
     // One-way path emits the same salted grammar but keeps no mapping.
     if mode == RedactMode::Reversible {
-        // Safety: VaultRequired guard above ensures vault is Some here.
+        // Safety: MappingStoreRequired guard above ensures vault is Some here.
         let id = vault
             .expect("vault required; already checked above")
-            .put(VaultRecord { call_salt, entries });
+            .put(MappingRecord { call_salt, entries });
         return Ok((redacted, Some(id)));
     }
 
@@ -413,7 +413,7 @@ pub fn redact(
 /// # Errors
 ///
 /// * [`RedactError::UnknownMappingId`] — `mapping_id` is not in the vault.
-pub fn unredact(text: &str, mapping_id: &str, vault: &Vault) -> Result<String, RedactError> {
+pub fn unredact(text: &str, mapping_id: &str, vault: &MappingStore) -> Result<String, RedactError> {
     let record = vault
         .get(mapping_id)
         .ok_or_else(|| RedactError::UnknownMappingId {
@@ -689,7 +689,7 @@ mod tests {
     // AC1: round-trip — redact → unredact → original text restored exactly.
     #[test]
     fn round_trip_restores_original() {
-        let vault = Vault::new();
+        let vault = MappingStore::new();
         let text = "Contact alice@example.com for support.";
         let (redacted, mid_opt) =
             redact(text, "default", RedactMode::Reversible, Some(&vault)).unwrap();
@@ -713,7 +713,7 @@ mod tests {
     // AC2: unknown mapping_id → RedactError::UnknownMappingId (sanitised error).
     #[test]
     fn unknown_mapping_id_returns_domain_error() {
-        let vault = Vault::new();
+        let vault = MappingStore::new();
         let err = unredact("[Email_deadbeef]", "map_0000000000000000", &vault)
             .expect_err("unknown mapping_id must produce an error");
         assert!(
@@ -725,7 +725,7 @@ mod tests {
     // AC3: tokens absent from the vault mapping are left untouched.
     #[test]
     fn unknown_token_left_untouched() {
-        let vault = Vault::new();
+        let vault = MappingStore::new();
         let text = "Hello alice@example.com!";
         let (redacted, mid_opt) =
             redact(text, "default", RedactMode::Reversible, Some(&vault)).unwrap();
@@ -753,7 +753,7 @@ mod tests {
     // lookup is scoped to the specified mapping_id only.
     #[test]
     fn no_cross_mapping_bleed() {
-        let vault = Vault::new();
+        let vault = MappingStore::new();
         let text_a = "Contact alice@example.com.";
         let text_b = "Reach out to bob@example.org.";
 
@@ -788,7 +788,7 @@ mod tests {
     // AC5: failure-path for missing/expired mapping_id.
     #[test]
     fn missing_mapping_id_returns_error() {
-        let vault = Vault::new();
+        let vault = MappingStore::new();
         let result = unredact("text with [Email_deadbeef]", "map_does_not_exist", &vault);
         match result.expect_err("missing mapping must return an error") {
             RedactError::UnknownMappingId { mapping_id } => {
@@ -801,7 +801,7 @@ mod tests {
     // R1 AC: unknown profile rejected before any processing.
     #[test]
     fn unknown_profile_rejected() {
-        let vault = Vault::new();
+        let vault = MappingStore::new();
         let err = redact("text", "bad_profile", RedactMode::Reversible, Some(&vault))
             .expect_err("unknown profile must error");
         assert!(
@@ -810,14 +810,14 @@ mod tests {
         );
     }
 
-    // R1 AC: reversible mode without a vault → VaultRequired.
+    // R1 AC: reversible mode without a vault → MappingStoreRequired.
     #[test]
     fn reversible_without_vault_errors() {
         let err = redact("alice@example.com", "default", RedactMode::Reversible, None)
             .expect_err("reversible without vault must error");
         assert!(
-            matches!(err, RedactError::VaultRequired),
-            "error must be VaultRequired, got: {err:?}"
+            matches!(err, RedactError::MappingStoreRequired),
+            "error must be MappingStoreRequired, got: {err:?}"
         );
     }
 
@@ -844,8 +844,8 @@ mod tests {
     // claimed but did not deliver.
     #[test]
     fn cross_call_tokens_differ_but_each_round_trips() {
-        let v1 = Vault::new();
-        let v2 = Vault::new();
+        let v1 = MappingStore::new();
+        let v2 = MappingStore::new();
         let text = "From alice@example.com to bob@example.org.";
         let (r1, m1) = redact(text, "default", RedactMode::Reversible, Some(&v1)).unwrap();
         let (r2, m2) = redact(text, "default", RedactMode::Reversible, Some(&v2)).unwrap();
@@ -862,7 +862,7 @@ mod tests {
     // different discriminators), and the whole thing round-trips.
     #[test]
     fn distinct_values_distinct_tokens_and_round_trip() {
-        let vault = Vault::new();
+        let vault = MappingStore::new();
         let text = "From alice@a.com to bob@b.com.";
         let (redacted, mid_opt) =
             redact(text, "pii", RedactMode::Reversible, Some(&vault)).unwrap();
@@ -883,7 +883,7 @@ mod tests {
     // occurrences restore.
     #[test]
     fn repeated_value_shares_one_token() {
-        let vault = Vault::new();
+        let vault = MappingStore::new();
         let text = "a@x.com then a@x.com again.";
         let (redacted, mid_opt) =
             redact(text, "pii", RedactMode::Reversible, Some(&vault)).unwrap();
@@ -900,10 +900,10 @@ mod tests {
         );
     }
 
-    // Vault id format: "map_{n:016x}".
+    // MappingStore id format: "map_{n:016x}".
     #[test]
     fn vault_id_format() {
-        let vault = Vault::new();
+        let vault = MappingStore::new();
         let (_, mid0) = redact("a@b.com", "default", RedactMode::Reversible, Some(&vault)).unwrap();
         let (_, mid1) = redact("c@d.com", "default", RedactMode::Reversible, Some(&vault)).unwrap();
         assert_eq!(mid0.unwrap(), "map_0000000000000000");

@@ -6,15 +6,15 @@ from ogentic_redact.categories import CATEGORY_GROUP_PRECEDENCE
 from ogentic_redact.errors import (
     AuditError,
     LocalhostOnlyError,
+    MappingNotFound,
+    MappingStoreError,
     RedactError,
-    VaultError,
-    VaultNotFound,
 )
 from ogentic_redact.profile import DEFAULT_ENTITY_TYPES, KNOWN_PROFILES, Profile
 from ogentic_redact.redactor import Redactor, RedactResult
 from ogentic_redact.span import Span
+from ogentic_redact.stores import InProcessMappingStore, SQLiteMappingStore
 from ogentic_redact.stream import redact_stream
-from ogentic_redact.vault import InProcessVault, SQLiteVault
 
 __all__ = [
     "CATEGORY_GROUP_PRECEDENCE",
@@ -24,16 +24,16 @@ __all__ = [
     "AuditEmitter",
     "AuditError",
     "DetectionEvent",
-    "InProcessVault",
+    "InProcessMappingStore",
     "LocalhostOnlyError",
+    "MappingNotFound",
+    "MappingStoreError",
     "Profile",
     "RedactError",
     "RedactResult",
     "Redactor",
-    "SQLiteVault",
+    "SQLiteMappingStore",
     "Span",
-    "VaultError",
-    "VaultNotFound",
     "__version__",
     "redact_stream",
 ]

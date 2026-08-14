@@ -303,8 +303,8 @@ def test_unredact_raises_when_not_reversible() -> None:
 
 def test_unredact_raises_on_missing_token() -> None:
     """`unredact()` raises an error when a vault token is not in the text."""
-    from ogentic_redact.vault import InProcessVault
-    r = Redactor(reversible=True, vault=InProcessVault())
+    from ogentic_redact.stores import InProcessMappingStore
+    r = Redactor(reversible=True, vault=InProcessMappingStore())
     mapping_id = r.vault.store({"[RTKN_deadbeef0000]": "secret"}, "")
     with pytest.raises(KeyError):
         r.unredact("no tokens here", mapping_id)
@@ -319,8 +319,8 @@ def test_unredact_raises_on_non_string_input() -> None:
 
 def test_unredact_empty_vault_returns_text_unchanged() -> None:
     """`unredact()` with an empty vault returns the text unchanged."""
-    from ogentic_redact.vault import InProcessVault
-    r = Redactor(reversible=True, vault=InProcessVault())
+    from ogentic_redact.stores import InProcessMappingStore
+    r = Redactor(reversible=True, vault=InProcessMappingStore())
     mapping_id = r.vault.store({}, "")
     assert r.unredact("some text", mapping_id) == "some text"
 
