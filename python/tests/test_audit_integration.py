@@ -54,7 +54,7 @@ class TestAC1RedactEmitsAuditEvents:
         text = "My name is Alice and my email is alice@example.com"
         spans = [
             Span(entity_type="PERSON", start=11, end=16, group=0),
-            Span(entity_type="EMAIL_ADDRESS", start=37, end=56, group=0),
+            Span(entity_type="EMAIL_ADDRESS", start=33, end=50, group=0),
         ]
 
         redactor.redact(
@@ -77,9 +77,9 @@ class TestAC1RedactEmitsAuditEvents:
         text = "Alice and Bob are friends, alice@example.com and bob@example.com"
         spans = [
             Span(entity_type="PERSON", start=0, end=5, group=0),
-            Span(entity_type="PERSON", start=14, end=17, group=0),
-            Span(entity_type="EMAIL_ADDRESS", start=27, end=46, group=0),
-            Span(entity_type="EMAIL_ADDRESS", start=51, end=68, group=0),
+            Span(entity_type="PERSON", start=10, end=13, group=0),
+            Span(entity_type="EMAIL_ADDRESS", start=27, end=44, group=0),
+            Span(entity_type="EMAIL_ADDRESS", start=49, end=64, group=0),
         ]
 
         redactor.redact(

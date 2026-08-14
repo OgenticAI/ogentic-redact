@@ -65,22 +65,27 @@ def _apply_substitutions(text: str, spans: list[tuple[int, int, str]]) -> str:
 def redact_stream(
     chunks: Iterable[str],
     profile: Profile,
+    cloud: bool = False,
     audit_emitter: AuditEmitter | None = None,
     tenant_id: str = "",
     request_id: str = "",
 ) -> Generator[tuple[str, list[DetectionEvent]], None, None]:
     """Yield ``(redacted_chunk, events)`` pairs for each input chunk.
 
-    The generator is on-device — it makes no network calls. Entity detection
-    uses Presidio with a local spaCy model. Entities that span a chunk boundary
-    are captured via a sliding tail buffer and fully redacted in the chunk where
-    they *end*.
+    The generator is on-device by default — it makes no network calls. Entity
+    detection uses Presidio with a local spaCy model. Entities that span a
+    chunk boundary are captured via a sliding tail buffer and fully redacted
+    in the chunk where they *end*.
+
+    Cloud-assisted recognisers require explicit ``cloud=True`` opt-in.
 
     Token format follows OGE-1200 (REDACT-R1): ``<<ENTITY_TYPE_N>>``.
 
     Args:
         chunks: Iterable of raw transcript-chunk strings.
         profile: Specifies which entity types to detect and the language code.
+        cloud: If True, enable cloud-assisted recognisers (with first-use warning).
+            Default is False (on-device only).
         audit_emitter: Optional audit event emitter. If provided, an audit
             detection event is emitted after all chunks are processed,
             aggregating detections by entity type. If audit emission fails,

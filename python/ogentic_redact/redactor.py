@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import warnings
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -15,7 +16,9 @@ from ogentic_redact.logging import log_structured
 from ogentic_redact.span import Span
 
 if TYPE_CHECKING:
-    pass
+    from ogentic_redact.vault import Vault
+
+_cloud_warned: bool = False
 
 
 @dataclass
@@ -24,12 +27,14 @@ class RedactResult:
 
     Attributes:
         text: The redacted text.
-        vault: Mapping from token to original value.  Only populated when
-            :class:`Redactor` was constructed with ``reversible=True``.
+        vault: Deprecated. Kept for backwards compatibility; always empty in reversible mode.
+        mapping_id: Opaque identifier for retrieving mapping from vault.
+            Only set when :class:`Redactor` was constructed with ``reversible=True``.
     """
 
     text: str
     vault: dict[str, str] = field(default_factory=dict)
+    mapping_id: str | None = None
 
 
 class Redactor:
@@ -40,9 +45,21 @@ class Redactor:
     * **One-way** (default): each span is replaced with a bracketed entity
       label, e.g. ``[EMAIL]``.  The original value cannot be recovered.
     * **Reversible** (``reversible=True``): each span is replaced with a
-      salted opaque token, e.g. ``[RTKN_3a7f9c12ab01]``, and the
-      :attr:`RedactResult.vault` mapping token→original is returned.  The
-      vault is never stored inline — callers own the vault lifecycle.
+      salted opaque token, e.g. ``[RTKN_3a7f9c12ab01]``, and the mapping is
+      stored in a separate Vault. An opaque mapping_id is returned; the
+      original plaintext mapping is never returned inline.
+
+    Cloud recognisers:
+        By default, the redactor operates on-device only (localhost). Cloud-
+        assisted recognisers require explicit ``cloud=True`` opt-in and emit a
+        first-use runtime warning. Attempting to use cloud recognisers without
+        the flag raises :class:`LocalhostOnlyError`.
+
+    Audit:
+        When an ``audit_emitter`` is passed to :meth:`redact`, one audit
+        detection event is emitted per detected entity type. Emission is
+        fail-closed: if the emitter raises, redaction raises :class:`AuditError`
+        rather than silently completing without an audit record.
 
     Salt semantics:
         A fresh 128-bit random salt is generated on every :meth:`redact`
@@ -51,13 +68,25 @@ class Redactor:
         maps to the same token (within-call stability).
     """
 
-    def __init__(self, reversible: bool = False) -> None:
+    def __init__(
+        self,
+        reversible: bool = False,
+        vault: Vault | None = None,
+        cloud: bool = False,
+    ) -> None:
         self.reversible = reversible
+        self.cloud = cloud
+        self.vault = vault
+        if reversible and vault is None:
+            from ogentic_redact.vault import InProcessVault
+
+            self.vault = InProcessVault()
 
     def redact(
         self,
         text: str,
         spans: list[Span] | None = None,
+        matter_id: str = "",
         audit_emitter: AuditEmitter | None = None,
         tenant_id: str = "",
         request_id: str = "",
@@ -69,30 +98,44 @@ class Redactor:
             text: Source string to redact.
             spans: Entity spans to replace.  Overlapping spans are resolved
                 before replacement; see :meth:`resolve_overlaps`.
+            matter_id: Tenant/matter identifier for vault scoping. Defaults to
+                empty string for single-tenant scenarios.
             audit_emitter: Optional audit event emitter. If provided, an audit
                 detection event is emitted for each detected entity type. If
                 audit emission fails, redaction raises :class:`AuditError`
                 (fail-closed).
-            tenant_id: Tenant identifier for audit context. Required if
-                audit_emitter is provided.
-            request_id: Request identifier for audit context. Required if
-                audit_emitter is provided.
-            profile: Profile name (e.g., "shield-legal", "default") for audit
+            tenant_id: Tenant identifier for audit context.
+            request_id: Request identifier for audit context.
+            profile: Profile name (e.g. "shield-legal", "default") for audit
                 context.
 
         Returns:
             A :class:`RedactResult` with the redacted text and, in reversible
-            mode, the token→original vault.
+            mode, the opaque mapping_id (never the plaintext vault).
 
         Raises:
             TypeError: If *text* is not a :class:`str`.
             ValueError: If any span has ``start < 0``, ``end > len(text)``,
-                or ``start >= end``.
-            AuditError: If audit_emitter is provided and audit event emission
-                fails (fail-closed).
+                or ``start >= end``, or if vault storage fails.
+            LocalhostOnlyError: If a cloud recogniser is requested without
+                explicit ``cloud=True`` opt-in.
+            AuditError: If *audit_emitter* is provided and event emission fails
+                (fail-closed).
         """
         if not isinstance(text, str):
             raise TypeError(f"text must be str, got {type(text).__name__!r}")
+
+        if self.cloud:
+            global _cloud_warned
+            if not _cloud_warned:
+                warnings.warn(
+                    "Cloud-assisted recognisers are enabled. Sensitive data may be "
+                    "sent to external services. Disable with cloud=False to enforce "
+                    "on-device-only redaction.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                _cloud_warned = True
 
         spans = spans or []
 
@@ -104,19 +147,22 @@ class Redactor:
 
         resolved = self.resolve_overlaps(spans)
 
+        # Audit counts, in document order. `resolved` is sorted by start
+        # ascending, so a Counter over it preserves first-occurrence order —
+        # the replacement loop below runs right-to-left and must not be used
+        # for ordering.
+        entity_counts: dict[str, int] = Counter(span.entity_type for span in resolved)
+
         # Per-call salt: ensures tokens differ across independent calls.
         salt = os.urandom(16).hex()
 
-        vault: dict[str, str] = {}
+        vault_dict: dict[str, str] = {}
         # Within-call stability: same (value, entity_type) → same token.
         _seen: dict[tuple[str, str], str] = {}
-        # Track entity types and counts for audit.
-        entity_counts: dict[str, int] = Counter()
 
         # Replace right-to-left so earlier indices stay valid.
         for span in sorted(resolved, key=lambda s: s.start, reverse=True):
             value = text[span.start : span.end]
-            entity_counts[span.entity_type] += 1
 
             if self.reversible:
                 key = (value, span.entity_type)
@@ -126,7 +172,7 @@ class Redactor:
                     ).hexdigest()[:12]
                     token = f"[RTKN_{digest}]"
                     _seen[key] = token
-                    vault[token] = value
+                    vault_dict[token] = value
                 else:
                     token = _seen[key]
             else:
@@ -134,21 +180,20 @@ class Redactor:
 
             text = text[: span.start] + token + text[span.end :]
 
-        result = RedactResult(text=text, vault=vault)
+        mapping_id = None
+        if self.reversible:
+            # Invariant: reversible mode always has a vault (see __init__).
+            assert self.vault is not None
+            try:
+                mapping_id = self.vault.store(vault_dict, matter_id)
+            except Exception as e:
+                raise ValueError("Vault storage failed (details hidden)") from e
+
+        result = RedactResult(text=text, vault={}, mapping_id=mapping_id)
 
         if audit_emitter is not None:
             mode = "reversible" if self.reversible else "one-way"
             for entity_type, count in entity_counts.items():
-                mapping_id = None
-                if self.reversible and vault:
-                    mapping_ids = [
-                        token
-                        for token in vault
-                        if token.startswith("[RTKN_")
-                    ]
-                    if mapping_ids:
-                        mapping_id = mapping_ids[0]
-
                 event = AuditDetectionEvent(
                     entity_type=entity_type,
                     mode=mode,
@@ -158,7 +203,6 @@ class Redactor:
                     tenant_id=tenant_id,
                     request_id=request_id,
                 )
-
                 try:
                     audit_emitter.emit(event)
                 except Exception as e:
@@ -177,19 +221,26 @@ class Redactor:
 
         return result
 
-    def unredact(self, redacted_text: str, vault: dict[str, str]) -> str:
-        """Restore original text from *redacted_text* using *vault*.
+    def unredact(
+        self,
+        redacted_text: str,
+        mapping_id: str,
+        matter_id: str = "",
+    ) -> str:
+        """Restore original text from *redacted_text* using vault lookup.
 
         Args:
             redacted_text: A string previously returned by :meth:`redact`.
-            vault: The :attr:`RedactResult.vault` from the same call.
+            mapping_id: The :attr:`RedactResult.mapping_id` from the same call.
+            matter_id: Tenant/matter identifier. Must match the one passed to redact().
 
         Returns:
             The original text with all tokens substituted back.
 
         Raises:
             ValueError: If the :class:`Redactor` was not created with
-                ``reversible=True``.
+                ``reversible=True``, or if mapping_id is not found under matter_id,
+                or if vault access fails.
             TypeError: If *redacted_text* is not a :class:`str`.
             KeyError: If a vault token is not present in *redacted_text*.
         """
@@ -200,8 +251,17 @@ class Redactor:
                 f"redacted_text must be str, got {type(redacted_text).__name__!r}"
             )
 
+        # Invariant: reversible mode always has a vault (see __init__).
+        assert self.vault is not None
+        try:
+            vault_dict = self.vault.fetch(mapping_id, matter_id)
+        except Exception as e:
+            raise ValueError(
+                f"Unable to restore mapping_id={mapping_id!r} under matter_id={matter_id!r}"
+            ) from e
+
         result = redacted_text
-        for token, original in vault.items():
+        for token, original in vault_dict.items():
             if token not in result:
                 raise KeyError(f"Token {token!r} not found in redacted text")
             result = result.replace(token, original)
