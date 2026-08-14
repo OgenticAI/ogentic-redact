@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import uuid
 from typing import Protocol
 
@@ -124,16 +125,26 @@ class SQLiteVault:
         """Initialize SQLiteVault.
 
         Args:
-            db_path: Path to SQLite database file. If None, use ":memory:".
+            db_path: Path to a SQLite database file. If None, an in-memory
+                database is used.
+
+        A single connection is held for the vault's lifetime. This is required
+        for the in-memory default: a fresh ``sqlite3.connect(":memory:")`` per
+        operation would open a *new, empty* database each time, so the schema
+        created at init would be invisible to later ``store``/``fetch`` calls.
+        ``check_same_thread=False`` plus a lock lets one vault be shared across
+        threads (e.g. a request handler).
         """
         self.db_path = db_path or ":memory:"
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._lock = threading.Lock()
         self._init_schema()
 
     def _init_schema(self) -> None:
-        """Initialize database schema on first use."""
+        """Create the ``vaults`` table if it does not already exist."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute(
+            with self._lock:
+                self._conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS vaults (
                         id TEXT NOT NULL,
@@ -143,9 +154,13 @@ class SQLiteVault:
                     )
                     """
                 )
-                conn.commit()
+                self._conn.commit()
         except sqlite3.Error as e:
             raise VaultError(f"Failed to initialize vault schema: {e}") from e
+
+    def close(self) -> None:
+        """Close the underlying connection; the vault is unusable afterwards."""
+        self._conn.close()
 
     def store(
         self,
@@ -168,15 +183,15 @@ class SQLiteVault:
         mapping_json = json.dumps(mapping)
 
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute(
+            with self._lock:
+                self._conn.execute(
                     """
                     INSERT INTO vaults (id, matter_id, mapping)
                     VALUES (?, ?, ?)
                     """,
                     (mapping_id, matter_id, mapping_json),
                 )
-                conn.commit()
+                self._conn.commit()
         except sqlite3.Error as e:
             raise VaultError(f"Failed to store mapping in vault: {e}") from e
 
@@ -201,8 +216,8 @@ class SQLiteVault:
             VaultError on storage failure.
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.execute(
+            with self._lock:
+                cursor = self._conn.execute(
                     """
                     SELECT mapping FROM vaults
                     WHERE id = ? AND matter_id = ?

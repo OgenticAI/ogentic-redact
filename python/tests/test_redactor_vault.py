@@ -105,8 +105,12 @@ class TestAC3MatterScoping:
         mapping_a = vault.fetch(result_a.mapping_id, "matter_a")
         mapping_b = vault.fetch(result_b.mapping_id, "matter_b")
 
-        assert mapping_a == mapping_b
+        # Same source value → same recovered original in both matters, but the
+        # per-call salt (OGE-1209) makes the token keys differ across calls.
+        assert sorted(mapping_a.values()) == sorted(mapping_b.values())
+        assert set(mapping_a.keys()).isdisjoint(mapping_b.keys())
 
+        # Matter isolation: a's mapping cannot be fetched under b's matter_id.
         with pytest.raises(VaultNotFound):
             vault.fetch(result_a.mapping_id, "matter_b")
 

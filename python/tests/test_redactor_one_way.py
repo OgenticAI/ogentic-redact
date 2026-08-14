@@ -41,8 +41,12 @@ class TestOneWayIrreversible:
             text,
             [Span(start=12, end=29, entity_type="EMAIL_ADDRESS", group=0)],
         )
-        assert len(result.vault) > 0
-        assert any("alice@example.com" in v for v in result.vault.values())
+        # Reversible mode stores the mapping in the Vault (never inline), and
+        # returns an opaque mapping_id; RedactResult.vault stays empty.
+        assert result.mapping_id is not None
+        assert result.vault == {}
+        mapping = redactor.vault.fetch(result.mapping_id, "")
+        assert any("alice@example.com" in v for v in mapping.values())
 
 
 class TestLocalhostOnlyGuard:
