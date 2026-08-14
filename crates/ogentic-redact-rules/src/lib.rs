@@ -29,15 +29,26 @@ pub use loader::Loader;
 pub enum RulePackError {
     /// Rule pack JSON is malformed or missing required fields.
     #[error("invalid rule pack: {reason}")]
-    InvalidPack { reason: String },
+    InvalidPack {
+        /// Human-readable description of what made the pack invalid.
+        reason: String,
+    },
 
     /// Rule pack regex pattern does not compile.
     #[error("invalid regex pattern in {entity_type}: {pattern}")]
-    InvalidPattern { entity_type: String, pattern: String },
+    InvalidPattern {
+        /// The entity type whose pattern failed to compile.
+        entity_type: String,
+        /// The offending regex pattern.
+        pattern: String,
+    },
 
     /// Unknown category requested.
     #[error("unknown rule pack category: {category}")]
-    UnknownCategory { category: String },
+    UnknownCategory {
+        /// The category string that was not recognised.
+        category: String,
+    },
 
     /// JSON deserialization error.
     #[error("failed to parse rule pack JSON: {0}")]
@@ -45,7 +56,10 @@ pub enum RulePackError {
 
     /// Rule pack not found.
     #[error("rule pack not found: {category}")]
-    PackNotFound { category: String },
+    PackNotFound {
+        /// The category whose pack could not be located.
+        category: String,
+    },
 }
 
 /// Categories of rule packs in the system.
@@ -132,11 +146,9 @@ impl RulePack {
     pub fn validate(&self) -> Result<(), RulePackError> {
         for entity in &self.entities {
             for pattern in &entity.patterns {
-                regex::Regex::new(&pattern.regex).map_err(|_| {
-                    RulePackError::InvalidPattern {
-                        entity_type: entity.entity_type.clone(),
-                        pattern: pattern.regex.clone(),
-                    }
+                regex::Regex::new(&pattern.regex).map_err(|_| RulePackError::InvalidPattern {
+                    entity_type: entity.entity_type.clone(),
+                    pattern: pattern.regex.clone(),
                 })?;
             }
         }

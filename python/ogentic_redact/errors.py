@@ -2,7 +2,34 @@
 
 from __future__ import annotations
 
-__all__ = ["LocalhostOnlyError"]
+__all__ = [
+    "AuditError",
+    "LocalhostOnlyError",
+    "RedactError",
+    "VaultError",
+    "VaultNotFound",
+]
+
+
+class RedactError(Exception):
+    """Base exception for redaction errors."""
+
+
+class VaultError(RedactError):
+    """Base exception for vault operations."""
+
+
+class VaultNotFound(VaultError):
+    """Mapping not found under the given matter_id."""
+
+
+class AuditError(RedactError):
+    """Raised when an audit event cannot be recorded.
+
+    Redaction fails closed: an audit event must be successfully recorded, or the
+    redaction operation raises this exception rather than silently succeeding
+    without audit.
+    """
 
 
 class LocalhostOnlyError(Exception):

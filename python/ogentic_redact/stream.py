@@ -5,13 +5,17 @@ Backs Sotto Desktop Meeting Mode (step 2 live redaction — OGE-1221).
 
 from __future__ import annotations
 
+import logging
+from collections import Counter
 from collections.abc import Generator, Iterable
 from typing import TYPE_CHECKING
 
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-from ogentic_redact.audit import DetectionEvent
+from ogentic_redact.audit import AuditDetectionEvent, AuditEmitter, DetectionEvent
+from ogentic_redact.errors import AuditError
+from ogentic_redact.logging import log_structured
 from ogentic_redact.profile import Profile
 
 if TYPE_CHECKING:
@@ -62,6 +66,9 @@ def redact_stream(
     chunks: Iterable[str],
     profile: Profile,
     cloud: bool = False,
+    audit_emitter: AuditEmitter | None = None,
+    tenant_id: str = "",
+    request_id: str = "",
 ) -> Generator[tuple[str, list[DetectionEvent]], None, None]:
     """Yield ``(redacted_chunk, events)`` pairs for each input chunk.
 
@@ -79,74 +86,117 @@ def redact_stream(
         profile: Specifies which entity types to detect and the language code.
         cloud: If True, enable cloud-assisted recognisers (with first-use warning).
             Default is False (on-device only).
+        audit_emitter: Optional audit event emitter. If provided, an audit
+            detection event is emitted after all chunks are processed,
+            aggregating detections by entity type. If audit emission fails,
+            redaction raises :class:`AuditError` (fail-closed).
+        tenant_id: Tenant identifier for audit context. Required if
+            audit_emitter is provided.
+        request_id: Request identifier for audit context. Required if
+            audit_emitter is provided.
 
     Yields:
         A ``(redacted_chunk, events)`` tuple for every input chunk.  ``events``
         is a (possibly empty) list of :class:`DetectionEvent` objects describing
         each detection in the *original* chunk coordinate space.
+
+    Raises:
+        AuditError: If audit_emitter is provided and audit event emission
+            fails after the stream completes (fail-closed).
     """
     analyzer = _get_analyzer()
     entity_counters: dict[str, int] = {}
     tail = ""
+    all_entity_counts: dict[str, int] = Counter()
 
-    for chunk_index, chunk in enumerate(chunks):
-        combined = tail + chunk
-        tail_len = len(tail)
+    try:
+        for chunk_index, chunk in enumerate(chunks):
+            combined = tail + chunk
+            tail_len = len(tail)
 
-        results: list[RecognizerResult] = analyzer.analyze(
-            text=combined,
-            entities=profile.entity_types,
-            language=profile.language,
-        )
-
-        # Sort by start so substitutions can be processed cleanly.
-        results.sort(key=lambda r: r.start)
-
-        # Deduplicate overlapping spans (keep highest-score span).
-        deduped: list[RecognizerResult] = []
-        last_end = -1
-        for res in results:
-            if res.start < last_end:
-                # Overlapping with previous; keep higher score.
-                if res.score > deduped[-1].score:
-                    deduped[-1] = res
-                continue
-            deduped.append(res)
-            last_end = res.end
-
-        # Split into:
-        #   • skip_spans  — entirely within the tail (already handled or not ours)
-        #   • apply_spans — overlap with the current chunk (boundary or local)
-        chunk_substitutions: list[tuple[int, int, str]] = []
-        events: list[DetectionEvent] = []
-
-        for res in deduped:
-            if res.end <= tail_len:
-                # Entirely in the tail — skip (previous chunk handled it or it
-                # exists only in the tail padding).
-                continue
-
-            # Compute the portion of this span that falls within *chunk*.
-            chunk_start = max(res.start - tail_len, 0)
-            chunk_end = res.end - tail_len  # always > 0 given the filter above
-
-            # Assign a token (shared counter across chunks for consistency).
-            token = _build_token(res.entity_type, entity_counters)
-            chunk_substitutions.append((chunk_start, chunk_end, token))
-            events.append(
-                DetectionEvent(
-                    entity_type=res.entity_type,
-                    chunk_index=chunk_index,
-                    start=chunk_start,
-                    end=chunk_end,
-                    score=res.score,
-                )
+            results: list[RecognizerResult] = analyzer.analyze(
+                text=combined,
+                entities=profile.entity_types,
+                language=profile.language,
             )
 
-        redacted_chunk = _apply_substitutions(chunk, chunk_substitutions)
+            # Sort by start so substitutions can be processed cleanly.
+            results.sort(key=lambda r: r.start)
 
-        # Update the tail for the *next* iteration (use the original chunk so
-        # boundary detection in the next chunk works against original offsets).
-        tail = chunk[-_TAIL_CHARS:] if len(chunk) > _TAIL_CHARS else chunk
+            # Deduplicate overlapping spans (keep highest-score span).
+            deduped: list[RecognizerResult] = []
+            last_end = -1
+            for res in results:
+                if res.start < last_end:
+                    # Overlapping with previous; keep higher score.
+                    if res.score > deduped[-1].score:
+                        deduped[-1] = res
+                    continue
+                deduped.append(res)
+                last_end = res.end
 
-        yield redacted_chunk, events
+            # Split into:
+            #   • skip_spans  — entirely within the tail (already handled or not ours)
+            #   • apply_spans — overlap with the current chunk (boundary or local)
+            chunk_substitutions: list[tuple[int, int, str]] = []
+            events: list[DetectionEvent] = []
+
+            for res in deduped:
+                if res.end <= tail_len:
+                    # Entirely in the tail — skip (previous chunk handled it or it
+                    # exists only in the tail padding).
+                    continue
+
+                # Compute the portion of this span that falls within *chunk*.
+                chunk_start = max(res.start - tail_len, 0)
+                chunk_end = res.end - tail_len  # always > 0 given the filter above
+
+                # Assign a token (shared counter across chunks for consistency).
+                token = _build_token(res.entity_type, entity_counters)
+                chunk_substitutions.append((chunk_start, chunk_end, token))
+                events.append(
+                    DetectionEvent(
+                        entity_type=res.entity_type,
+                        chunk_index=chunk_index,
+                        start=chunk_start,
+                        end=chunk_end,
+                        score=res.score,
+                    )
+                )
+                all_entity_counts[res.entity_type] += 1
+
+            redacted_chunk = _apply_substitutions(chunk, chunk_substitutions)
+
+            # Update the tail for the *next* iteration (use the original chunk so
+            # boundary detection in the next chunk works against original offsets).
+            tail = chunk[-_TAIL_CHARS:] if len(chunk) > _TAIL_CHARS else chunk
+
+            yield redacted_chunk, events
+    finally:
+        if audit_emitter is not None:
+            for entity_type, count in all_entity_counts.items():
+                event = AuditDetectionEvent(
+                    entity_type=entity_type,
+                    mode="one-way",
+                    profile=profile.entity_types[0] if profile.entity_types else "default",
+                    count=count,
+                    mapping_id=None,
+                    tenant_id=tenant_id,
+                    request_id=request_id,
+                )
+
+                try:
+                    audit_emitter.emit(event)
+                except Exception as e:
+                    log_structured(
+                        logging.ERROR,
+                        "audit event emission failed",
+                        tenant_id=tenant_id,
+                        request_id=request_id,
+                        op="redact_stream",
+                        entity_type=entity_type,
+                        error=str(e),
+                    )
+                    raise AuditError(
+                        "audit event recording failed; redaction not completed"
+                    ) from e

@@ -3,7 +3,7 @@
 //! Loads built-in rule packs (privilege, PHI, MNPI) from embedded JSON data
 //! and validates them before returning.
 
-use crate::{RulePackError, RulePack, RulePackCategory};
+use crate::{RulePack, RulePackCategory, RulePackError};
 
 /// Loader for rule packs.
 ///
@@ -34,10 +34,7 @@ impl Loader {
         };
 
         let pack: RulePack = serde_json::from_str(json_data).map_err(|e| {
-            RulePackError::SerdeError(format!(
-                "failed to parse {} rule pack: {}",
-                category, e
-            ))
+            RulePackError::SerdeError(format!("failed to parse {} rule pack: {}", category, e))
         })?;
 
         pack.validate()?;
@@ -51,11 +48,11 @@ impl Loader {
     /// A vector of all three rule packs (privilege, PHI, MNPI) if all load
     /// and validate successfully. Returns an error on the first failure.
     pub fn load_all(&self) -> Result<Vec<RulePack>, RulePackError> {
-        let mut packs = Vec::with_capacity(3);
-
-        packs.push(self.load_pack(RulePackCategory::Privilege)?);
-        packs.push(self.load_pack(RulePackCategory::PHI)?);
-        packs.push(self.load_pack(RulePackCategory::MNPI)?);
+        let packs = vec![
+            self.load_pack(RulePackCategory::Privilege)?,
+            self.load_pack(RulePackCategory::PHI)?,
+            self.load_pack(RulePackCategory::MNPI)?,
+        ];
 
         Ok(packs)
     }
@@ -117,8 +114,7 @@ mod tests {
         let loader = Loader::new();
         let packs = loader.load_all().unwrap();
 
-        let categories: Vec<RulePackCategory> =
-            packs.iter().map(|p| p.category).collect();
+        let categories: Vec<RulePackCategory> = packs.iter().map(|p| p.category).collect();
 
         assert!(categories.contains(&RulePackCategory::Privilege));
         assert!(categories.contains(&RulePackCategory::PHI));
@@ -131,7 +127,10 @@ mod tests {
         let packs = loader.load_all().unwrap();
 
         for pack in packs {
-            assert!(!pack.precedence_group.is_empty(), "each pack must have a precedence group");
+            assert!(
+                !pack.precedence_group.is_empty(),
+                "each pack must have a precedence group"
+            );
         }
     }
 
@@ -141,7 +140,10 @@ mod tests {
         let packs = loader.load_all().unwrap();
 
         for pack in packs {
-            assert!(!pack.entities.is_empty(), "each pack must have at least one entity type");
+            assert!(
+                !pack.entities.is_empty(),
+                "each pack must have at least one entity type"
+            );
         }
     }
 }
