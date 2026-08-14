@@ -23,3 +23,5 @@ all-features = true
 ogentic-redact-core = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
