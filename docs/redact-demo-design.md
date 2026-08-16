@@ -69,16 +69,22 @@ change detection (that path lands with OGE-1230).
 
 ## 3. MCP tool surface
 
-The MCP server follows the pattern established in `ogentic-shield` (see
-`shield/src/ogentic_shield/mcp/server.py`). It uses `mcp>=1.0` FastMCP with
-`@server.tool(name="...")` decorators. Tool inputs are JSON-friendly primitives
-(strings), not dataclasses.
+Implemented in `python/ogentic_redact/mcp/` (OGE-1270); run with
+`python -m ogentic_redact.mcp`. The MCP server follows the pattern established in
+`ogentic-shield` (see `shield/src/ogentic_shield/mcp/server.py`). It uses
+`mcp>=1.0` FastMCP with `@server.tool(name="...")` decorators. Tool inputs are
+JSON-friendly primitives (strings), not dataclasses.
 
 The server is an optional dependency:
 
 ```
 pip install 'ogentic-redact[mcp]'
 ```
+
+Detection is the core on-device byte-scanner (EMAIL / PHONE / US_SSN) via the
+`_native` extension — a documented development convenience; production spans come
+from Shield (ADR-0002 / OGE-1230). The `profile` argument is validated against the
+allow-list but does not yet steer detection.
 
 Two tools are exposed:
 

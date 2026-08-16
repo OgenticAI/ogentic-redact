@@ -156,6 +156,7 @@ jobs:
             hypothesis \
             ruff \
             mypy \
+            "mcp>=1.0,<2.0" \
             presidio-analyzer \
             presidio-anonymizer \
             "spacy>=3.7"
