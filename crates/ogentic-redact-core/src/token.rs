@@ -75,7 +75,7 @@ const LABEL_TABLE: &[(&str, &[&str])] = &[
 
 /// Map a Shield category / entity-type string to its token label.
 ///
-/// Known entity types resolve through [`LABEL_TABLE`]; anything else falls back
+/// Known entity types resolve through the internal `LABEL_TABLE`; anything else falls back
 /// to `title-case with underscores removed` (`COUNSEL_COMMUNICATION` →
 /// `CounselCommunication`), matching Shield's `_label_for` fallback. The result
 /// is always CamelCase with no underscore, so it is safe in the grammar.

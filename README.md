@@ -78,18 +78,15 @@ ogentic-redact = "0.1"
 
 ## Quickstart
 
-### One-way redaction
+### One-way redaction (CLI)
 
-Tokens are non-reversible by default. Use this mode when you do not need to restore the original content.
+Redaction is non-reversible by default. The CLI redacts on-device — detection uses
+the built-in byte-scanner (EMAIL / PHONE / US_SSN), a development convenience;
+production spans come from [`ogentic-shield`](https://github.com/OgenticAI/ogentic-shield).
 
-```python
-from ogentic_redact import Redactor
-
-redactor = Redactor()
-result = redactor.redact("Send the report to alice@example.com by Friday.")
-
-print(result.text)
-# Send the report to [RTKN_3f8a2c1d9e4b7a6f] by Friday.
+```bash
+echo "Send the report to alice@example.com by Friday." | ogentic-redact -
+# Send the report to [Email_3f8a2c1b] by Friday.
 ```
 
 Each call uses a fresh 128-bit random salt — tokens from different calls never collide, even for identical input values.
@@ -98,26 +95,38 @@ Each call uses a fresh 128-bit random salt — tokens from different calls never
 
 Enable the vault to restore original content after LLM processing:
 
+`Redactor` acts on **spans** — detection is Shield's job (ADR-0002). Pass the spans
+Shield returns; the example supplies them directly.
+
 ```python
-from ogentic_redact import Redactor
+from ogentic_redact import Redactor, Span
 
 redactor = Redactor(reversible=True)
 
-# Step 1 — redact before sending to LLM
-result = redactor.redact("Alice Johnson, SSN 123-45-6789, called about her claim.")
+# Step 1 — redact before sending to LLM (spans would come from Shield in production)
+text = "Alice Johnson, SSN 123-45-6789, called about her claim."
+spans = [
+    Span(start=0, end=13, entity_type="PERSON", group=0),
+    Span(start=19, end=30, entity_type="US_SSN", group=0),
+]
+result = redactor.redact(text, spans)
 print(result.text)
-# [RTKN_a1b2c3d4], SSN [RTKN_e5f6a7b8], called about her claim.
+# [RTKN_…], SSN [RTKN_…], called about her claim.
 
-# Step 2 — send result.text to your LLM (it never sees PII)
-llm_response = "[RTKN_a1b2c3d4] has a pending claim for [RTKN_e5f6a7b8]."
+# Step 2 — send result.text to your LLM (it never sees PII); keep result.mapping_id
+llm_response = result.text.replace("called about her claim", "has a pending claim")
 
-# Step 3 — restore original values from vault
-restored = redactor.unredact(llm_response, result.vault)
+# Step 3 — restore original values via the opaque mapping_id
+restored = redactor.unredact(llm_response, result.mapping_id)
 print(restored)
-# Alice Johnson has a pending claim for 123-45-6789.
+# Alice Johnson, SSN 123-45-6789, has a pending claim.
 ```
 
-The vault (`result.vault`) holds the token→original mapping. It is **never returned inline** — it is always a separate object. This is a deliberate architectural commitment: redacted text and its mapping must not be collocated after the call returns.
+The token→original mapping is held in a separate **mapping store** and referenced by
+the opaque `result.mapping_id` — it is **never returned inline** (`result.vault` is
+deprecated and always empty). This is a deliberate architectural commitment:
+redacted text and its reversal secret must not be collocated after the call returns.
+See the [API guide](docs/api-guide.md) for the full `mapping_id` lifecycle.
 
 ---
 
@@ -163,9 +172,9 @@ pip install 'ogentic-redact[cloud]'
 
 ## Status
 
-**v0.1.0 — General Availability (pre-alpha API surface)**
+**v0.1.0 — pre-release (nothing published to a registry yet)**
 
-The core redaction engine and Python bindings are stable. The CLI and MCP server are stubs targeting Wave 2. The public API may change before v1.0.
+The core redaction engine, the Python/Node/Swift bindings, the CLI, and the optional MCP server are implemented. No `v*` release has been tagged, so nothing is on PyPI / npm / crates.io yet; the public API may change before v1.0.
 
 Supported platforms: macOS arm64, Linux x64, Windows x64.
 
@@ -173,8 +182,10 @@ Supported platforms: macOS arm64, Linux x64, Windows x64.
 
 ## Further reading
 
-- [F2 ADR — Reversible vault design](docs/adr/0001-reversible-redaction-token-format.md)
-- [F4 Threat model](docs/threat-model.md)
+- [API guide — modes, salt, and the mapping-id lifecycle](docs/api-guide.md)
+- [ADR-0003 — Ecosystem token grammar (Shield-aligned)](docs/adr/0003-ecosystem-token-grammar.md)
+- [ADR-0002 — Stack: Rust core with bindings](docs/adr/0002-stack-rust-core-with-bindings.md)
+- [Threat model](docs/threat-model.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 

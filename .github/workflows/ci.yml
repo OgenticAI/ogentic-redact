@@ -36,6 +36,28 @@ jobs:
       - name: clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  # ── Rust: API docs (rustdoc) ─────────────────────────────────────────────────
+  # OGE-1284: the rustdoc reference must build with zero warnings, so the
+  # published API docs (docs.rs on release) cannot silently rot.
+  docs-rust:
+    name: "Rust docs (rustdoc)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: rustdoc (deny warnings)
+        run: cargo doc --no-deps --workspace
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
   # ── Rust: tests ───────────────────────────────────────────────────────────────
   test-rust:
     name: "Rust tests"
