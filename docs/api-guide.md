@@ -149,11 +149,16 @@ Without `--mapping` the redaction is one-way. See [redact-demo-design §2](redac
 Detection + one-way (core byte-scanner, `[Label_<hex>]`):
 
 ```python
-import ogentic_redact._native as native
-out = native.redact("email alice@example.com, ssn 123-45-6789")
+import ogentic_redact as redact
+
+out = redact.redact("email alice@example.com, ssn 123-45-6789")
 # out["text"]  -> "email [Email_…], ssn [Ssn_…]"
 # out["tokens"] -> {token: original}
+original = redact.unredact(out["text"], out["tokens"])
 ```
+
+`redact` / `redact_with_salt` / `unredact` are the core one-way primitives (thin
+binding over the Rust core, ADR-0002); `redact_stream` is the streaming detector.
 
 Reversible with caller-supplied spans (`Redactor`, legacy `[RTKN_<hex>]` grammar —
 see [§2](#2-token-grammar)):
