@@ -1,1 +1,9 @@
+"""Type stub for the `_native` Rust extension (see `python/ogentic-redact-py`)."""
+
+from typing import Any
+
 __version__: str
+
+def redact(text: str) -> dict[str, Any]: ...
+def redact_with_salt(text: str, salt: bytes) -> dict[str, Any]: ...
+def unredact(text: str, tokens: dict[str, str]) -> str: ...
