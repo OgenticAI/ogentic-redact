@@ -7,8 +7,8 @@
 /// # Quick start
 /// ```swift
 /// let result = try OgenticRedact.redact("Email alice@example.com for details.")
-/// print(result.text)          // "Email [EMAIL_1] for details."
-/// print(result.tokenMap)      // ["[EMAIL_1]": "alice@example.com"]
+/// print(result.text)          // "Email [Email_3f8a2c1b] for details."
+/// print(result.tokenMap)      // ["[Email_3f8a2c1b]": "alice@example.com"]
 ///
 /// let restored = try OgenticRedact.unredact(result.text, using: result.tokenMap)
 /// print(restored)             // "Email alice@example.com for details."
@@ -37,12 +37,12 @@ public enum OgenticRedactError: Error, Equatable {
 
 /// The result of a redaction operation.
 public struct RedactedText: Sendable, Equatable {
-    /// The input text with PII replaced by placeholder tokens (e.g. `[EMAIL_1]`).
+    /// The input text with PII replaced by placeholder tokens (e.g. `[Email_3f8a2c1b]`).
     public let text: String
 
     /// Maps each placeholder to the original value it replaced.
     ///
-    /// Example: `["[EMAIL_1]": "alice@example.com"]`
+    /// Example: `["[Email_3f8a2c1b]": "alice@example.com"]`
     ///
     /// Pass this to `OgenticRedact.unredact(_:using:)` to restore the
     /// original text.
