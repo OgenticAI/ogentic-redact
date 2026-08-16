@@ -216,6 +216,40 @@ jobs:
           flags: python
           fail_ci_if_error: false
 
+  # ── Python: package build + PyPI metadata validation ─────────────────────────
+  # OGE-1254: the wheel/sdist must build and pass `twine check`, so the package
+  # stays publish-ready (metadata renders on PyPI) without needing a release tag.
+  package-python:
+    name: "Python package (build + metadata)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Create virtualenv
+        run: |
+          python -m venv .venv
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install build tooling
+        run: pip install maturin twine
+
+      - name: Build wheel + sdist
+        run: |
+          maturin build --release
+          maturin sdist
+
+      - name: Validate package metadata (twine check)
+        run: twine check target/wheels/*.whl target/wheels/*.tar.gz
+
   # ── Rust: criterion benchmark (informational) ─────────────────────────────────
   bench-rust:
     name: "Rust benchmark (criterion)"

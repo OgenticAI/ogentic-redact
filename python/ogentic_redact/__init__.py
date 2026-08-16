@@ -1,6 +1,15 @@
 """ogentic-redact — real-time, on-device sensitive-content redaction."""
 
-from ogentic_redact._native import __version__
+# Core one-way primitives, implemented in Rust (`ogentic-redact-core`) and exposed
+# through the `_native` extension. These are the thin binding over the core (ADR-0002)
+# and emit the `[Label_<salted-hex>]` grammar (ADR-0003). For reversible / span-based
+# redaction with a mapping store, use the :class:`Redactor` class instead.
+from ogentic_redact._native import (
+    __version__,
+    redact,
+    redact_with_salt,
+    unredact,
+)
 from ogentic_redact.audit import AuditDetectionEvent, AuditEmitter, DetectionEvent
 from ogentic_redact.categories import CATEGORY_GROUP_PRECEDENCE
 from ogentic_redact.errors import (
@@ -35,5 +44,8 @@ __all__ = [
     "SQLiteMappingStore",
     "Span",
     "__version__",
+    "redact",
     "redact_stream",
+    "redact_with_salt",
+    "unredact",
 ]
