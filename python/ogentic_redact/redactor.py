@@ -11,11 +11,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ogentic_redact.audit import AuditDetectionEvent, AuditEmitter
+from ogentic_redact.classifier import DEFAULT_MIN_CONFIDENCE
 from ogentic_redact.errors import AuditError
 from ogentic_redact.logging import log_structured
 from ogentic_redact.span import Span
 
 if TYPE_CHECKING:
+    from ogentic_redact.classifier import ClassifierProtocol
     from ogentic_redact.stores import MappingStore
 
 _cloud_warned: bool = False
@@ -49,6 +51,15 @@ class Redactor:
       stored in a separate MappingStore. An opaque mapping_id is returned; the
       original plaintext mapping is never returned inline.
 
+    Classifier (ADR-0002 / OGE-1230):
+        Redact does not detect entities — it applies policy to spans produced by
+        a classifier. Inject one via ``Redactor(classifier=...)``; when
+        :meth:`redact` is called without ``spans``, they are sourced from the
+        classifier (e.g. :class:`~ogentic_redact.classifier.ShieldAdapter`) and
+        filtered by ``min_confidence``. With no classifier and no spans, nothing
+        is redacted. The core depends only on
+        :class:`~ogentic_redact.classifier.ClassifierProtocol`.
+
     Cloud recognisers:
         By default, the redactor operates on-device only (localhost). Cloud-
         assisted recognisers require explicit ``cloud=True`` opt-in and emit a
@@ -73,10 +84,17 @@ class Redactor:
         reversible: bool = False,
         mapping_store: MappingStore | None = None,
         cloud: bool = False,
+        classifier: ClassifierProtocol | None = None,
+        min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     ) -> None:
         self.reversible = reversible
         self.cloud = cloud
         self.mapping_store = mapping_store
+        # Classifier boundary (ADR-0002 / OGE-1230): when set and no spans are
+        # passed to redact(), spans are sourced from this classifier instead of
+        # being detected here. The core depends only on the protocol.
+        self.classifier = classifier
+        self.min_confidence = min_confidence
         if reversible and mapping_store is None:
             from ogentic_redact.stores import InProcessMappingStore
 
@@ -97,7 +115,11 @@ class Redactor:
         Args:
             text: Source string to redact.
             spans: Entity spans to replace.  Overlapping spans are resolved
-                before replacement; see :meth:`resolve_overlaps`.
+                before replacement; see :meth:`resolve_overlaps`. When ``None``
+                and a ``classifier`` was injected, spans are sourced from the
+                classifier for *text* under *profile* (Shield classifies, Redact
+                applies policy — spans below ``min_confidence`` are dropped).
+                When ``None`` with no classifier, nothing is redacted.
             matter_id: Tenant/matter identifier for vault scoping. Defaults to
                 empty string for single-tenant scenarios.
             audit_emitter: Optional audit event emitter. If provided, an audit
@@ -137,7 +159,12 @@ class Redactor:
                 )
                 _cloud_warned = True
 
-        spans = spans or []
+        # Span source (ADR-0002): explicit caller spans win; otherwise pull from
+        # the injected classifier; otherwise redact nothing. Redact never detects.
+        if spans is None and self.classifier is not None:
+            spans = self._classify_spans(text, profile)
+        else:
+            spans = spans or []
 
         for span in spans:
             if span.start < 0 or span.end > len(text) or span.start >= span.end:
@@ -220,6 +247,18 @@ class Redactor:
                     ) from e
 
         return result
+
+    def _classify_spans(self, text: str, profile: str) -> list[Span]:
+        """Source spans from the injected classifier, applying the confidence policy.
+
+        Shield classifies; Redact applies policy: classified spans with
+        ``confidence`` below :attr:`min_confidence` are dropped, and the rest are
+        converted to internal :class:`Span` objects. Raising is left to the
+        classifier (a :class:`~ogentic_redact.errors.ClassifierError` on failure).
+        """
+        assert self.classifier is not None  # guarded by the caller
+        classified = self.classifier.classify(text, profile)
+        return [rs.to_span() for rs in classified if rs.confidence >= self.min_confidence]
 
     def unredact(
         self,

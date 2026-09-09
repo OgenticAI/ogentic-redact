@@ -12,14 +12,29 @@ from ogentic_redact._native import (
 )
 from ogentic_redact.audit import AuditDetectionEvent, AuditEmitter, DetectionEvent
 from ogentic_redact.categories import CATEGORY_GROUP_PRECEDENCE
+from ogentic_redact.classifier import (
+    DEFAULT_MIN_CONFIDENCE,
+    SHIELD_PROFILES,
+    ClassifierProtocol,
+    FixtureShieldAdapter,
+    RedactSpan,
+    ShieldAdapter,
+)
 from ogentic_redact.errors import (
     AuditError,
+    ClassifierError,
     LocalhostOnlyError,
     MappingNotFound,
     MappingStoreError,
     RedactError,
 )
-from ogentic_redact.profile import DEFAULT_ENTITY_TYPES, KNOWN_PROFILES, Profile
+from ogentic_redact.profile import (
+    DEFAULT_ENTITY_TYPES,
+    KNOWN_PROFILES,
+    SHIELD_FINANCE,
+    SHIELD_LEGAL,
+    Profile,
+)
 from ogentic_redact.redactor import Redactor, RedactResult
 from ogentic_redact.span import Span
 from ogentic_redact.stores import InProcessMappingStore, SQLiteMappingStore
@@ -28,11 +43,18 @@ from ogentic_redact.stream import redact_stream
 __all__ = [
     "CATEGORY_GROUP_PRECEDENCE",
     "DEFAULT_ENTITY_TYPES",
+    "DEFAULT_MIN_CONFIDENCE",
     "KNOWN_PROFILES",
+    "SHIELD_FINANCE",
+    "SHIELD_LEGAL",
+    "SHIELD_PROFILES",
     "AuditDetectionEvent",
     "AuditEmitter",
     "AuditError",
+    "ClassifierError",
+    "ClassifierProtocol",
     "DetectionEvent",
+    "FixtureShieldAdapter",
     "InProcessMappingStore",
     "LocalhostOnlyError",
     "MappingNotFound",
@@ -40,8 +62,10 @@ __all__ = [
     "Profile",
     "RedactError",
     "RedactResult",
+    "RedactSpan",
     "Redactor",
     "SQLiteMappingStore",
+    "ShieldAdapter",
     "Span",
     "__version__",
     "redact",
