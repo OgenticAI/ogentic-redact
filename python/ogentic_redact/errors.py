@@ -4,6 +4,7 @@ from __future__ import annotations
 
 __all__ = [
     "AuditError",
+    "ClassifierError",
     "LocalhostOnlyError",
     "MappingNotFound",
     "MappingStoreError",
@@ -21,6 +22,15 @@ class MappingStoreError(RedactError):
 
 class MappingNotFound(MappingStoreError):
     """Mapping not found under the given matter_id."""
+
+
+class ClassifierError(RedactError):
+    """Raised when a classifier (e.g. the Shield adapter) fails to return spans.
+
+    Wraps transport/parse failures behind a sanitised message so raw adapter
+    errors (URLs, upstream response bodies) are never surfaced to the caller
+    (CLAUDE.md §4). The underlying cause is chained for local logging only.
+    """
 
 
 class AuditError(RedactError):

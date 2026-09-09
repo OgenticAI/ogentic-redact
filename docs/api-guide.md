@@ -179,6 +179,36 @@ original = r.unredact(res.text, res.mapping_id)
 `Redactor` takes spans because detection is Shield's job (ADR-0002); pass the
 spans Shield returns, or use the `_native` byte-scanner above for a dev demo.
 
+#### Consuming Shield spans (OGE-1230)
+
+Rather than pass spans by hand, inject a **classifier** and let `Redactor` source
+them. The core depends only on `ClassifierProtocol` (`classify(text, profile) ->
+list[RedactSpan]`); swap the real `ShieldAdapter` for a `FixtureShieldAdapter` in
+tests. Shield classifies; Redact applies policy — spans below `min_confidence`
+(default `0.5`) are dropped.
+
+```python
+from ogentic_redact import Redactor, ShieldAdapter, SHIELD_LEGAL
+
+# Real path: ShieldAdapter POSTs {text, profile} to Shield's analyze endpoint.
+# Point it at a localhost Shield to stay on-device (network use is explicit).
+redactor = Redactor(classifier=ShieldAdapter("http://127.0.0.1:8600"))
+result = redactor.redact("Alice, SSN 123-45-6789", profile=SHIELD_LEGAL)
+```
+
+```python
+# Test/demo path: no HTTP — hardcode the spans Shield would have returned.
+from ogentic_redact import Redactor, RedactSpan, FixtureShieldAdapter
+
+spans = [RedactSpan(category="US_SSN", start=11, end=22, confidence=0.95, text="123-45-6789")]
+redactor = Redactor(classifier=FixtureShieldAdapter(spans))
+redactor.redact("Alice, SSN 123-45-6789", profile="shield-legal")  # -> "Alice, SSN [US_SSN]"
+```
+
+`RedactSpan(category, start, end, confidence, text)` is the boundary model Shield's
+`DetectedEntity` maps into; the default `Redactor()` (no classifier, no spans)
+makes no network calls.
+
 ### MCP server (optional `[mcp]` extra)
 
 ```bash

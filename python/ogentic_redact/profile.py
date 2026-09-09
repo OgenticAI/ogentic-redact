@@ -4,7 +4,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-__all__ = ["DEFAULT_ENTITY_TYPES", "KNOWN_PROFILES", "Profile"]
+__all__ = [
+    "DEFAULT_ENTITY_TYPES",
+    "KNOWN_PROFILES",
+    "SHIELD_FINANCE",
+    "SHIELD_LEGAL",
+    "Profile",
+]
+
+# Shield profile taxonomy (OGE-1230 AC3) — first-class constants so callers and
+# adapters reference names symbolically rather than by bare string literal. These
+# are the profile ids the Shield adapter passes straight through to Shield.
+SHIELD_LEGAL = "shield-legal"
+SHIELD_FINANCE = "shield-finance"
 
 DEFAULT_ENTITY_TYPES: list[str] = [
     "PERSON",
