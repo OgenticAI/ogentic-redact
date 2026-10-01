@@ -7,7 +7,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ---
 
-## [Unreleased]
+## [0.1.0] — 2026-10-01
+
+First public release. Published to PyPI; crates.io and npm follow once their
+registry tokens are configured.
 
 ### Privacy and correctness
 
@@ -49,23 +52,19 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   duplicate publication, enforce binding-load failures, and test built artifacts.
 - Document migration requirements and current limits in `docs/api-guide.md`.
 
-## [0.1.0] — 2026-07-17
-
 ### Added
 
 #### Core library (`ogentic-redact-core`)
 - One-way redaction (`redact_one_way`) with `[TYPE_N]` token format
 - Reversible redaction (`unredact_one_way`) via in-memory vault
 - Span type with `(start, end, entity_type, group)` for precise entity location
-- Apache-2.0 license, published to [crates.io](https://crates.io/crates/ogentic-redact-core)
+- Apache-2.0 license
 
 #### Rule pack loader (`ogentic-redact-rules`)
 - Entity-detection rule pack loader and validator
-- Published to [crates.io](https://crates.io/crates/ogentic-redact-rules)
 
 #### CLI (`ogentic-redact`)
 - `ogentic-redact` binary: redact files and streams from the command line
-- Published to [crates.io](https://crates.io/crates/ogentic-redact)
 
 #### Python bindings (`ogentic-redact` on PyPI)
 - `redact_stream()` — sub-100ms streaming redaction using Presidio + spaCy
