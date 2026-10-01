@@ -16,9 +16,11 @@ permissions:
   attestations: write  # artifact attestation storage
 
 jobs:
-  # ── Pre-flight (audit D3: verify crates.io email before any publish) ───────────
+  # ── Pre-flight: parse the tag and check every package agrees on the version ──
+  # The crates.io email check lives in publish-crates, so a missing crates token
+  # can no longer stop PyPI or npm from publishing.
   preflight:
-    name: "Pre-flight: verify crates.io email + parse version"
+    name: "Pre-flight: parse version + check versions agree"
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -48,26 +50,6 @@ jobs:
           for path in [pathlib.Path("packages/ogentic-redact-node/package.json"), *pathlib.Path("packages/ogentic-redact-node/npm").glob("*/package.json")]:
               assert json.loads(path.read_text())["version"] == version, f"Version mismatch: {path}"
           PYCODE
-
-      # Audit D3 lesson: confirm crates.io account email is verified before
-      # attempting to publish. Publishing with an unverified email fails silently
-      # mid-run and leaves crates in a partially-published state.
-      - name: Verify crates.io account email is confirmed
-        env:
-          CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-        run: |
-          RESPONSE=$(curl -sf \
-            -H "Authorization: Bearer $CRATES_IO_TOKEN" \
-            -H "Accept: application/json" \
-            https://crates.io/api/v1/me)
-          EMAIL_VERIFIED=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['user']['email_verified'])")
-          if [ "$EMAIL_VERIFIED" != "True" ]; then
-            echo "::error::crates.io account email is NOT verified."
-            echo "Visit https://crates.io/settings/profile and verify your email before releasing."
-            echo "(Audit D3 lesson: ogentic-audit release was blocked by this exact issue.)"
-            exit 1
-          fi
-          echo "crates.io email verified — safe to publish."
 
   # ── Build Python wheels ────────────────────────────────────────────────────────
   build-wheels:
@@ -256,6 +238,26 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # Audit D3 lesson: confirm crates.io account email is verified before
+      # attempting to publish. Publishing with an unverified email fails silently
+      # mid-run and leaves crates in a partially-published state.
+      - name: Verify crates.io account email is confirmed
+        env:
+          CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          RESPONSE=$(curl -sf \
+            -H "Authorization: Bearer $CRATES_IO_TOKEN" \
+            -H "Accept: application/json" \
+            https://crates.io/api/v1/me)
+          EMAIL_VERIFIED=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['user']['email_verified'])")
+          if [ "$EMAIL_VERIFIED" != "True" ]; then
+            echo "::error::crates.io account email is NOT verified."
+            echo "Visit https://crates.io/settings/profile and verify your email before releasing."
+            echo "(Audit D3 lesson: ogentic-audit release was blocked by this exact issue.)"
+            exit 1
+          fi
+          echo "crates.io email verified — safe to publish."
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
