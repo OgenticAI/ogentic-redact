@@ -1,9 +1,9 @@
-"""Latency benchmark for redact_stream (OGE-1221 AC2).
+"""Latency benchmark for finalized-record redaction.
 
 Usage:
     python python/tests/bench_stream.py
 
-Pass criterion: median per-chunk wall-clock time <= 100 ms.
+Pass criterion: median per-record wall-clock time <= 100 ms.
 Exits with code 1 if the criterion is not met.
 """
 
@@ -52,8 +52,10 @@ def run_benchmark() -> None:
     print("Pre-warming analyzer …", flush=True)
     list(redact_stream(chunks[:2], profile))
 
-    print(f"Benchmarking {_NUM_CHUNKS} chunks of ~{_CHUNK_SIZE} chars each …", flush=True)
+    print(f"Benchmarking {_NUM_CHUNKS} finalized records of ~{_CHUNK_SIZE} chars each …", flush=True)
     latencies_ms: list[float] = []
+    # Each independent chunk is a complete record here. This benchmark does not
+    # measure time waiting for an unfinished transcript to finalize.
     for chunk in chunks:
         t0 = time.perf_counter()
         list(redact_stream([chunk], profile))
@@ -64,7 +66,7 @@ def run_benchmark() -> None:
     min_ms = min(latencies_ms)
     max_ms = max(latencies_ms)
 
-    print(f"\nResults ({_NUM_CHUNKS} chunks):")
+    print(f"\nResults ({_NUM_CHUNKS} finalized records):")
     print(f"  min    = {min_ms:.1f} ms")
     print(f"  median = {median_ms:.1f} ms")
     print(f"  p95    = {p95_ms:.1f} ms")

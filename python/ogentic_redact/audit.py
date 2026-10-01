@@ -11,13 +11,15 @@ __all__ = ["AuditDetectionEvent", "AuditEmitter", "DetectionEvent"]
 
 @dataclass(frozen=True, slots=True)
 class DetectionEvent:
-    """A single detected-entity event emitted per chunk.
+    """A protected portion of a detected entity in one original input chunk.
 
     Attributes:
         entity_type: Presidio entity type (e.g. ``"PERSON"``, ``"EMAIL_ADDRESS"``).
         chunk_index: Zero-based index of the chunk this event belongs to.
         start: Character offset (inclusive) within the *original* chunk string.
         end: Character offset (exclusive) within the *original* chunk string.
+            An entity spanning chunks has one clipped event per protected portion;
+            audit counts still count that entity once.
         score: Presidio recognition confidence score (0.0-1.0).
     """
 

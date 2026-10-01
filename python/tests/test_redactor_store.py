@@ -243,3 +243,61 @@ class TestErrorHandling:
 
         with pytest.raises(ValueError, match="MappingStore storage failed"):
             redactor.redact("admin@example.com", spans, matter_id="test")
+
+
+def test_partial_response_restores_only_present_tokens() -> None:
+    store = InProcessMappingStore()
+    redactor = Redactor(reversible=True, mapping_store=store)
+    result = redactor.redact("Alice alice@example.com", [Span(0, 5, "PERSON"), Span(6, 23, "EMAIL")])
+    mapping = store.fetch(result.mapping_id, "")
+    name_token = next(t for t, original in mapping.items() if original == "Alice")
+    assert redactor.unredact(f"Dear {name_token}", result.mapping_id) == "Dear Alice"
+
+
+def test_restore_does_not_rescan_inserted_token_shaped_originals() -> None:
+    store = InProcessMappingStore()
+    first, second = "[RTKN_aaaaaaaaaaaa]", "[RTKN_bbbbbbbbbbbb]"
+    mapping_id = store.store({first: second, second: "Alice"}, "")
+    redactor = Redactor(reversible=True, mapping_store=store)
+    assert redactor.unredact(f"{first} {second}", mapping_id) == f"{second} Alice"
+
+
+def test_generated_token_collisions_preserve_all_values_and_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    import ogentic_redact.redactor as module
+    class FixedDigest:
+        def hexdigest(self) -> str:
+            return "a" * 64
+    monkeypatch.setattr(module.hashlib, "sha256", lambda _: FixedDigest())
+    existing = "[RTKN_" + "a" * 32 + "]"
+    source = f"Alice Bob {existing}"
+    redactor = Redactor(reversible=True)
+    result = redactor.redact(source, [Span(0, 5, "PERSON"), Span(6, 9, "PERSON")])
+    assert existing in result.text
+    assert redactor.unredact(result.text, result.mapping_id) == source
+
+
+def test_consume_restoration_deletes_mapping() -> None:
+    redactor = Redactor(reversible=True)
+    result = redactor.redact("Alice", [Span(0, 5, "PERSON")], matter_id="a")
+    assert redactor.unredact(result.text, result.mapping_id, "a", consume=True) == "Alice"
+    with pytest.raises(ValueError):
+        redactor.unredact(result.text, result.mapping_id, "a")
+
+
+@pytest.mark.parametrize("factory", [InProcessMappingStore, SQLiteMappingStore])
+def test_audit_failure_rolls_back_mapping_and_sanitizes_logs(factory, caplog: pytest.LogCaptureFixture) -> None:
+    from ogentic_redact.audit import AuditEmitter
+    from ogentic_redact.errors import AuditError
+    class BrokenEmitter(AuditEmitter):
+        def emit(self, event) -> None:
+            raise RuntimeError("raw-Alice-secret")
+    store = factory()
+    redactor = Redactor(reversible=True, mapping_store=store)
+    with pytest.raises(AuditError):
+        redactor.redact("Alice", [Span(0, 5, "PERSON")], audit_emitter=BrokenEmitter())
+    if isinstance(store, SQLiteMappingStore):
+        assert store._conn.execute("SELECT COUNT(*) FROM vaults").fetchone()[0] == 0
+        store.close()
+    else:
+        assert store._store == {}
+    assert "raw-Alice-secret" not in caplog.text

@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use ogentic_redact_core::{redact_one_way_with_salt, unredact_one_way};
+use ogentic_redact_core::{redact_to_mapping_with_salt, unredact_one_way};
 use serde_json::{json, Map, Value};
 
 /// The fixed conformance salt: bytes 0x00..0x0f. Must match `TEST_SALT` in the
@@ -39,10 +39,10 @@ fn main() {
         let description = v["description"].as_str().unwrap_or("");
         let input = v["input"].as_str().unwrap();
 
-        let result = redact_one_way_with_salt(input, &SALT);
+        let result = redact_to_mapping_with_salt(input, &SALT);
 
         // Self-check: the golden file must round-trip.
-        let restored = unredact_one_way(&result.text, &result.tokens);
+        let restored = unredact_one_way(&result.text, &result.tokens).unwrap();
         assert_eq!(restored, input, "[{id}] round-trip failed while generating");
 
         // Deterministic key order for a stable file.
@@ -66,7 +66,7 @@ fn main() {
         "description": "F4 golden vectors — cross-language conformance for the ADR-0003 \
                         token grammar `[Label_<salted-hex>]`. Every surface (Rust, Python, \
                         Node.js, Swift), given `input` and the fixed `call_salt_hex`, must \
-                        produce byte-identical `expected_text` and `expected_tokens`, and \
+                        produce byte-identical `expected_text`; explicit reversible test helpers verify `expected_tokens` and \
                         must round-trip (unredact restores `input`).",
         "call_salt_hex": SALT_HEX,
         "vectors": out_vectors,
@@ -74,7 +74,12 @@ fn main() {
 
     let mut s = serde_json::to_string_pretty(&doc).expect("serialize");
     s.push('\n');
-    std::fs::write(&path, s).expect("write vectors.json");
+    std::fs::write(&path, &s).expect("write vectors.json");
+    std::fs::write(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vectors.json"),
+        &s,
+    )
+    .expect("write packaged vectors.json");
     eprintln!(
         "wrote {} vectors to {}",
         doc["vectors"].as_array().unwrap().len(),
