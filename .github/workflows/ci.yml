@@ -13,6 +13,26 @@ permissions:
   contents: read
 
 jobs:
+  msrv:
+    name: "Rust minimum supported version (1.88)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Check every workspace target at the declared minimum
+        run: cargo check --workspace --all-targets --locked
+
+  release-scripts:
+    name: "Release artifact checks"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check deterministic checksums and tamper rejection
+        run: bash scripts/test-checksums.sh
+
   # ── Rust: format + lint ───────────────────────────────────────────────────────
   lint-rust:
     name: "Rust lint (fmt + clippy)"
@@ -75,6 +95,19 @@ jobs:
 
       - name: Run workspace tests
         run: cargo test --workspace
+
+  # ── CLI: native Windows vault publication ────────────────────────────────────
+  test-cli-windows:
+    name: "Windows CLI vault tests"
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install minimum Rust toolchain
+        uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Check Windows private mapping publication and restoration
+        run: cargo test -p ogentic-redact --locked
 
   # ── Rust: dependency security scan ───────────────────────────────────────────
   audit-rust:
@@ -282,7 +315,7 @@ jobs:
 
   # ── Python: streaming performance budget gate ─────────────────────────────────
   bench-python:
-    name: "Python streaming latency gate (<= 100 ms/chunk)"
+    name: "Python finalized-record latency gate (<= 100 ms/record)"
     runs-on: ubuntu-latest
     timeout-minutes: 30
 

@@ -1,6 +1,10 @@
 # Redact Demo Path Design — CLI Round-Trip + MCP Server
 
-**Status:** Wave 2 planning (CLI and MCP are stubs today; implementation target September)
+**Status:** Historical Wave 2 design, retained for decision context. CLI and MCP
+are now implemented. The current contracts are in the [API guide](api-guide.md)
+and [ADR-0004](adr/0004-privacy-contract-hardening.md). The planning text below is
+not the current feature specification: profiles do not change MCP's development
+scanner, SQLite persistence exists, and there is no `[cloud]` installation extra.
 **Ticket:** [OGE-934](https://linear.app/ogenticai/issue/OGE-934)
 **Last updated:** 2026-06-27
 

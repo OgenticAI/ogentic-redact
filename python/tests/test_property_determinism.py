@@ -21,10 +21,9 @@ from ogentic_redact.span import Span
 # Shared strategies
 # ---------------------------------------------------------------------------
 
-# Restrict to printable ASCII letters, digits, and spaces so the generated
-# text never accidentally contains the token prefix "[RTKN_", which would
-# interfere with vault substitution during unredact.
-_SAFE_ALPHA = st.characters(whitelist_categories=("Lu", "Ll", "Nd", "Zs"))
+# Include punctuation and token syntax: restoration must preserve arbitrary
+# Unicode source values, including existing token-shaped strings.
+_SAFE_ALPHA = st.characters(blacklist_categories=("Cs",))
 _SAFE_TEXT = st.text(alphabet=_SAFE_ALPHA, min_size=0, max_size=200)
 _NONEMPTY_TEXT = _SAFE_TEXT.filter(lambda t: len(t) >= 1)
 _ENTITY_TYPES = st.sampled_from(["EMAIL", "PHONE", "NAME", "SSN", "DATE"])
@@ -178,7 +177,7 @@ def test_overlap_resolver_high_beats_low_precedence(
         group=1,
     )
     result = Redactor.resolve_overlaps([span_hi, span_lo])
-    assert result == [span_hi]
+    assert result == [Span(start, start + overlap + length, "HI", 0)]
 
 
 @given(
@@ -301,13 +300,12 @@ def test_unredact_raises_when_not_reversible() -> None:
         r.unredact("text", "fake_mapping_id")
 
 
-def test_unredact_raises_on_missing_token() -> None:
-    """`unredact()` raises an error when a vault token is not in the text."""
+def test_unredact_skips_tokens_absent_from_response() -> None:
+    """A response can omit sensitive values without invalidating restoration."""
     from ogentic_redact.stores import InProcessMappingStore
     r = Redactor(reversible=True, mapping_store=InProcessMappingStore())
     mapping_id = r.mapping_store.store({"[RTKN_deadbeef0000]": "secret"}, "")
-    with pytest.raises(KeyError):
-        r.unredact("no tokens here", mapping_id)
+    assert r.unredact("no tokens here", mapping_id) == "no tokens here"
 
 
 def test_unredact_raises_on_non_string_input() -> None:
@@ -359,42 +357,42 @@ class TestCategoryGroupPrecedence:
         privilege = Span(start=0, end=5, entity_type="SECRET", group=0)
         phi = Span(start=3, end=8, entity_type="MEDICAL", group=1)
         result = Redactor.resolve_overlaps([privilege, phi])
-        assert result == [privilege]
+        assert result == [Span(0, 8, "SECRET", 0)]
 
     def test_privilege_beats_mnpi(self) -> None:
         """PRIVILEGE (group=0) beats MNPI (group=2) on overlap."""
         privilege = Span(start=0, end=5, entity_type="SECRET", group=0)
         mnpi = Span(start=3, end=8, entity_type="TICKER", group=2)
         result = Redactor.resolve_overlaps([privilege, mnpi])
-        assert result == [privilege]
+        assert result == [Span(0, 8, "SECRET", 0)]
 
     def test_privilege_beats_pii(self) -> None:
         """PRIVILEGE (group=0) beats PII (group=3) on overlap."""
         privilege = Span(start=0, end=5, entity_type="SECRET", group=0)
         pii = Span(start=3, end=8, entity_type="EMAIL", group=3)
         result = Redactor.resolve_overlaps([privilege, pii])
-        assert result == [privilege]
+        assert result == [Span(0, 8, "SECRET", 0)]
 
     def test_phi_beats_mnpi(self) -> None:
         """PHI (group=1) beats MNPI (group=2) on overlap."""
         phi = Span(start=0, end=5, entity_type="MEDICAL", group=1)
         mnpi = Span(start=3, end=8, entity_type="TICKER", group=2)
         result = Redactor.resolve_overlaps([phi, mnpi])
-        assert result == [phi]
+        assert result == [Span(0, 8, "MEDICAL", 1)]
 
     def test_phi_beats_pii(self) -> None:
         """PHI (group=1) beats PII (group=3) on overlap."""
         phi = Span(start=0, end=5, entity_type="MEDICAL", group=1)
         pii = Span(start=3, end=8, entity_type="EMAIL", group=3)
         result = Redactor.resolve_overlaps([phi, pii])
-        assert result == [phi]
+        assert result == [Span(0, 8, "MEDICAL", 1)]
 
     def test_mnpi_beats_pii(self) -> None:
         """MNPI (group=2) beats PII (group=3) on overlap."""
         mnpi = Span(start=0, end=5, entity_type="TICKER", group=2)
         pii = Span(start=3, end=8, entity_type="EMAIL", group=3)
         result = Redactor.resolve_overlaps([mnpi, pii])
-        assert result == [mnpi]
+        assert result == [Span(0, 8, "TICKER", 2)]
 
     def test_three_way_overlap_privilege_wins(self) -> None:
         """PRIVILEGE wins in 3-way overlap: PRIVILEGE+PHI+PII."""
@@ -402,7 +400,7 @@ class TestCategoryGroupPrecedence:
         phi = Span(start=3, end=12, entity_type="MEDICAL", group=1)
         pii = Span(start=5, end=15, entity_type="EMAIL", group=3)
         result = Redactor.resolve_overlaps([phi, pii, privilege])
-        assert result == [privilege]
+        assert result == [Span(0, 15, "SECRET", 0)]
 
     def test_three_way_overlap_phi_wins_when_privilege_absent(self) -> None:
         """PHI wins when PRIVILEGE is absent: PHI+MNPI+PII."""
@@ -410,7 +408,7 @@ class TestCategoryGroupPrecedence:
         mnpi = Span(start=3, end=12, entity_type="TICKER", group=2)
         pii = Span(start=5, end=15, entity_type="EMAIL", group=3)
         result = Redactor.resolve_overlaps([mnpi, pii, phi])
-        assert result == [phi]
+        assert result == [Span(0, 15, "MEDICAL", 1)]
 
     def test_category_precedence_is_order_invariant(self) -> None:
         """Same overlaps resolve identically regardless of input order."""

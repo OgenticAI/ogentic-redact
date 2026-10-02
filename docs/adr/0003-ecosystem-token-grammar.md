@@ -1,5 +1,9 @@
 # ADR-0003: Ecosystem Token Grammar — Shield-Aligned `[Label_<salted-hex>]`
 
+> Amended by [ADR-0004](0004-privacy-contract-hardening.md): token identity now uses
+> exact originals, source token literals are reserved, and collision extension
+> continues until unique. See the API guide for current public return shapes.
+
 | Field      | Value                                      |
 |------------|--------------------------------------------|
 | **Number** | 0003                                       |

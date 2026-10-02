@@ -36,6 +36,11 @@ jobs:
       - name: Run unit tests (ogentic-redact-core)
         run: cargo test -p ogentic-redact-core
 
+      - name: Verify packaged fixtures match the shared contract
+        run: |
+          cmp conformance/category-labels.json crates/ogentic-redact-core/tests/fixtures/category-labels.json
+          cmp conformance/vectors.json crates/ogentic-redact-core/tests/fixtures/vectors.json
+
       - name: Run F3 conformance integration test
         run: cargo test -p ogentic-redact-core --test conformance_vectors
 
@@ -96,19 +101,18 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Install compatible napi-rs CLI
+        run: npm install -g @napi-rs/cli@2
+
       - name: Build napi-rs binding
-        run: |
-          cargo build --release -p ogentic-redact-node
-          # napi-rs generates the .node file in the package dir under target/
-          # Copy it to the package dir for the runner to locate it.
-          NODE_FILE=$(find target/release -name "libogentic_redact_node.so" | head -1)
-          if [ -z "$NODE_FILE" ]; then
-            echo "Warning: .so not found; trying .node glob"
-            NODE_FILE=$(find target -name "*.node" | head -1)
-          fi
-          if [ -n "$NODE_FILE" ]; then
-            cp "$NODE_FILE" packages/ogentic-redact-node/ogentic_redact_node.linux-x64-gnu.node 2>/dev/null || true
-          fi
+        working-directory: packages/ogentic-redact-node
+        run: napi build --platform --release
+
+      - name: Test safe defaults and reversible lifecycle
+        working-directory: packages/ogentic-redact-node
+        env:
+          OGENTIC_REDACT_BINDING: ./ogentic-redact.linux-x64-gnu.node
+        run: node tests/smoke.cjs
 
       - name: Run F3 conformance (Node.js surface)
         run: node conformance/run_conformance.mjs
@@ -136,6 +140,9 @@ jobs:
       - name: Verify libogentic_redact_ffi.a is present
         run: ls -lh swift/OgenticRedact/lib/libogentic_redact_ffi.a
 
+      - name: Verify Swift vectors match the shared contract
+        run: cmp conformance/vectors.json swift/OgenticRedact/Tests/OgenticRedactTests/Resources/vectors.json
+
       - name: Run F3 conformance (Swift surface)
         run: |
           swift test \
@@ -148,3 +155,6 @@ jobs:
           swift test \
             --package-path swift/OgenticRedact \
             -v
+
+      - name: Test an independent SwiftPM consumer
+        run: bash scripts/test-swift-consumer.sh
