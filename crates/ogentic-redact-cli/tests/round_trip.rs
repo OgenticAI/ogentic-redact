@@ -159,3 +159,295 @@ fn cloud_flag_emits_first_use_warning() {
         "default path should not warn, got: {stderr_default:?}"
     );
 }
+
+#[test]
+fn unknown_mapping_version_fails_before_writing_output() {
+    let scratch = Scratch::new("bad-version");
+    let input = scratch.path("redacted.txt");
+    let mapping = scratch.path("mapping.json");
+    fs::write(&input, "[Email_12345678]").unwrap();
+    fs::write(
+        &mapping,
+        r#"{"version":"future-format","tokens":{"[Email_12345678]":"secret@example.com"}}"#,
+    )
+    .unwrap();
+    let output = Command::new(BIN)
+        .args([
+            "unredact",
+            input.to_str().unwrap(),
+            "--mapping",
+            mapping.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("unsupported mapping format version"));
+    assert!(!error.contains("secret@example.com"));
+}
+
+#[test]
+fn mixed_case_and_unicode_surroundings_restore_without_changes() {
+    let scratch = Scratch::new("exact-variants");
+    let input = scratch.path("input.txt");
+    let mapping = scratch.path("mapping.json");
+    let redacted_path = scratch.path("redacted.txt");
+    let original = "José: Alice@example.com alice@example.com.\n";
+    fs::write(&input, original).unwrap();
+    let (redacted, _) = run(&[
+        input.to_str().unwrap(),
+        "--mapping",
+        mapping.to_str().unwrap(),
+    ]);
+    assert!(!redacted.contains("example.com"));
+    fs::write(&redacted_path, redacted).unwrap();
+    let (restored, _) = run(&[
+        "unredact",
+        redacted_path.to_str().unwrap(),
+        "--mapping",
+        mapping.to_str().unwrap(),
+    ]);
+    assert_eq!(restored, original);
+}
+
+#[test]
+fn vault_refuses_existing_files_and_input_aliases_without_stdout() {
+    let scratch = Scratch::new("no-clobber");
+    let input = scratch.path("input.txt");
+    let vault = scratch.path("vault.json");
+    fs::write(&input, SAMPLE).unwrap();
+    fs::write(&vault, "existing vault content").unwrap();
+    for destination in [&input, &vault] {
+        let output = Command::new(BIN)
+            .args([
+                input.to_str().unwrap(),
+                "--mapping",
+                destination.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("alice@example.com"));
+    }
+    assert_eq!(fs::read_to_string(&input).unwrap(), SAMPLE);
+    assert_eq!(
+        fs::read_to_string(&vault).unwrap(),
+        "existing vault content"
+    );
+    assert_eq!(
+        fs::read_dir(&scratch.dir).unwrap().count(),
+        2,
+        "temporary vault leaked"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn vault_refuses_symbolic_hard_and_dangling_links() {
+    use std::os::unix::fs::symlink;
+    let scratch = Scratch::new("links");
+    let input = scratch.path("input.txt");
+    fs::write(&input, SAMPLE).unwrap();
+    let symbolic = scratch.path("symlink.json");
+    let hard = scratch.path("hardlink.json");
+    let dangling = scratch.path("dangling.json");
+    let absent = scratch.path("absent.json");
+    symlink(&input, &symbolic).unwrap();
+    fs::hard_link(&input, &hard).unwrap();
+    symlink(&absent, &dangling).unwrap();
+    for destination in [&symbolic, &hard, &dangling] {
+        let output = Command::new(BIN)
+            .args([
+                input.to_str().unwrap(),
+                "--mapping",
+                destination.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+    }
+    assert_eq!(fs::read_to_string(&input).unwrap(), SAMPLE);
+    assert!(fs::symlink_metadata(&dangling)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(!absent.exists());
+    assert_eq!(fs::read_dir(&scratch.dir).unwrap().count(), 4);
+}
+
+#[cfg(unix)]
+#[test]
+fn published_vault_is_owner_only_complete_and_has_no_temporary_sibling() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new("private-mode");
+    let input = scratch.path("input.txt");
+    let vault = scratch.path("vault.json");
+    fs::write(&input, SAMPLE).unwrap();
+    run(&[
+        input.to_str().unwrap(),
+        "--mapping",
+        vault.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        fs::metadata(&vault).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&fs::read(&vault).unwrap()).unwrap();
+    assert_eq!(payload["version"], "f4");
+    assert_eq!(payload["tokens"].as_object().unwrap().len(), 3);
+    assert_eq!(fs::read_dir(&scratch.dir).unwrap().count(), 2);
+}
+
+#[test]
+fn failed_vault_publication_never_emits_redacted_stdout() {
+    let scratch = Scratch::new("failed-publish");
+    let input = scratch.path("input.txt");
+    let vault = scratch.path("missing/vault.json");
+    fs::write(&input, SAMPLE).unwrap();
+    let output = Command::new(BIN)
+        .args([
+            input.to_str().unwrap(),
+            "--mapping",
+            vault.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(fs::read_dir(&scratch.dir).unwrap().count(), 1);
+}
+
+#[test]
+fn restore_limits_fail_before_stdout_and_leave_vault_usable() {
+    let scratch = Scratch::new("restore-limits");
+    let input = scratch.path("input.txt");
+    let vault = scratch.path("vault.json");
+    fs::write(&input, "[Person_12345678]").unwrap();
+    let json = r#"{"version":"f4","tokens":{"[Person_12345678]":"é"}}"#;
+    fs::write(&vault, json).unwrap();
+    for (flag, value) in [("--max-output-bytes", "1"), ("--max-replacements", "0")] {
+        let output = Command::new(BIN)
+            .args([
+                "unredact",
+                input.to_str().unwrap(),
+                "--mapping",
+                vault.to_str().unwrap(),
+                flag,
+                value,
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("restoration limit exceeded"));
+        assert_eq!(fs::read_to_string(&vault).unwrap(), json);
+    }
+    assert_eq!(
+        run(&[
+            "unredact",
+            input.to_str().unwrap(),
+            "--mapping",
+            vault.to_str().unwrap(),
+            "--max-output-bytes",
+            "2",
+            "--max-replacements",
+            "1"
+        ])
+        .0,
+        "é"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn published_vault_has_only_a_protected_owner_rights_grant() {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::{
+        Foundation::{LocalFree, GENERIC_ALL},
+        Security::{
+            Authorization::{ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT},
+            GetAce, GetSecurityDescriptorControl, ACCESS_ALLOWED_ACE, DACL_SECURITY_INFORMATION,
+            SE_DACL_PROTECTED,
+        },
+        Storage::FileSystem::FILE_ALL_ACCESS,
+    };
+
+    let scratch = Scratch::new("private-dacl");
+    let input = scratch.path("input.txt");
+    let vault = scratch.path("vault.json");
+    fs::write(&input, SAMPLE).unwrap();
+    run(&[
+        input.to_str().unwrap(),
+        "--mapping",
+        vault.to_str().unwrap(),
+    ]);
+    let path: Vec<u16> = vault.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut descriptor = std::ptr::null_mut();
+    let mut dacl = std::ptr::null_mut();
+    // SAFETY: Win32 owns the returned descriptor; its ACL/ACE pointers are only
+    // read while it is live. Both LocalAlloc buffers are released below.
+    unsafe {
+        assert_eq!(
+            GetNamedSecurityInfoW(
+                path.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut descriptor
+            ),
+            0
+        );
+        assert!(!dacl.is_null(), "a NULL DACL would grant everyone access");
+        assert_eq!(
+            (*dacl).AceCount,
+            1,
+            "vault must have no inherited or additional grants"
+        );
+        let mut control = 0;
+        let mut revision = 0;
+        assert_ne!(
+            GetSecurityDescriptorControl(descriptor, &mut control, &mut revision),
+            0
+        );
+        let mut raw_ace = std::ptr::null_mut();
+        assert_ne!(GetAce(dacl, 0, &mut raw_ace), 0);
+        let ace = &*raw_ace.cast::<ACCESS_ALLOWED_ACE>();
+        assert_eq!(ace.Header.AceType, 0, "expected ACCESS_ALLOWED_ACE_TYPE");
+        assert_eq!(
+            ace.Header.AceFlags, 0,
+            "grant must be explicit and non-inheriting"
+        );
+        assert!(ace.Mask == FILE_ALL_ACCESS || ace.Mask == GENERIC_ALL);
+        let mut sid_string = std::ptr::null_mut();
+        assert_ne!(
+            ConvertSidToStringSidW(
+                std::ptr::addr_of!(ace.SidStart).cast_mut().cast(),
+                &mut sid_string
+            ),
+            0
+        );
+        let mut length = 0;
+        while *sid_string.add(length) != 0 {
+            length += 1;
+        }
+        let sid = String::from_utf16(std::slice::from_raw_parts(sid_string, length)).unwrap();
+        LocalFree(sid_string.cast());
+        LocalFree(descriptor);
+        assert_eq!(
+            sid, "S-1-3-4",
+            "only the Owner Rights SID may read the vault"
+        );
+        assert_ne!(
+            control & SE_DACL_PROTECTED,
+            0,
+            "parent ACL inheritance must be disabled"
+        );
+    }
+    assert_eq!(fs::read_dir(&scratch.dir).unwrap().count(), 2);
+}

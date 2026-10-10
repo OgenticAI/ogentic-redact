@@ -32,7 +32,13 @@ import os
 from typing import TYPE_CHECKING
 
 import ogentic_redact._native as _native
-from ogentic_redact.errors import MappingNotFound, MappingStoreError
+from ogentic_redact._restoration import (
+    DEFAULT_MAX_OUTPUT_BYTES,
+    DEFAULT_MAX_REPLACEMENTS,
+    validate_restoration_input,
+)
+from ogentic_redact.errors import MappingNotFound
+from ogentic_redact.logging import log_structured
 from ogentic_redact.profile import KNOWN_PROFILES
 from ogentic_redact.stores import InProcessMappingStore
 
@@ -86,10 +92,17 @@ def redact_outbound(
         raise ValueError("`text` must be a non-empty string")
     _resolve_profile(profile)
 
-    raw = _native.redact(text)
-    redacted: str = raw["text"]
-    tokens: dict[str, str] = raw["tokens"]
-    mapping_id = mapping_store.store(tokens, tenant_id)
+    try:
+        raw = _native._redact_to_mapping(text)
+        redacted: str = raw["text"]
+        tokens: dict[str, str] = raw["tokens"]
+        mapping_id = mapping_store.store(tokens, tenant_id)
+    except Exception as exc:
+        log_structured(
+            logging.ERROR, "outbound redaction failed", tenant_id=tenant_id,
+            op="redact_outbound", error_type=type(exc).__name__,
+        )
+        raise ValueError("outbound redaction unavailable") from None
     return {"redacted": redacted, "mapping_id": mapping_id}
 
 
@@ -99,23 +112,50 @@ def unredact_response(
     *,
     mapping_store: MappingStore,
     tenant_id: str,
+    consume: bool = False,
+    max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
+    max_replacements: int = DEFAULT_MAX_REPLACEMENTS,
 ) -> str:
     """Restore *text* using the mapping stored under (*tenant_id*, *mapping_id*).
+
+    Set ``consume=True`` to atomically delete after successful restoration. Unused
+    tokens are skipped, and restored values are not recursively substituted.
 
     Raises :class:`ValueError` if *mapping_id* is unknown/expired or was issued
     for a different tenant — the lookup is tenant-scoped, so a cross-tenant
     ``mapping_id`` surfaces as "unknown", never the wrong vault (demo-design §6).
     """
+    validate_restoration_input(text, max_output_bytes, max_replacements)
     try:
         tokens = mapping_store.fetch(mapping_id, tenant_id)
     except MappingNotFound:
         # Sanitised: never echo tenant/matter internals to the client.
         raise ValueError("unknown or expired mapping_id") from None
-    except MappingStoreError as e:
-        logger.error("mapping store fetch failed: %s", e)
+    except Exception as exc:
+        log_structured(
+            logging.ERROR, "mapping store fetch failed", tenant_id=tenant_id,
+            op="unredact_response", error_type=type(exc).__name__,
+        )
         raise ValueError("mapping store unavailable") from None
 
-    restored: str = _native.unredact(text, tokens)
+    try:
+        restored: str = _native.unredact(
+            text, tokens, max_output_bytes=max_output_bytes, max_replacements=max_replacements,
+        )
+    except Exception as exc:
+        log_structured(
+            logging.ERROR, "response restoration failed", tenant_id=tenant_id,
+            op="unredact_response", error_type=type(exc).__name__,
+        )
+        raise ValueError("response restoration unavailable") from None
+    if consume:
+        try:
+            if mapping_store.consume(mapping_id, tenant_id) != tokens:
+                raise ValueError("mapping changed during restoration")
+        except MappingNotFound:
+            raise ValueError("unknown or expired mapping_id") from None
+        except Exception:
+            raise ValueError("mapping store unavailable") from None
     return restored
 
 
@@ -124,6 +164,8 @@ def build_server(
     tenant_id: str | None = None,
     mapping_store: MappingStore | None = None,
     name: str = "ogentic-redact",
+    max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
+    max_replacements: int = DEFAULT_MAX_REPLACEMENTS,
 ) -> FastMCP:
     """Construct (but don't run) the FastMCP server.
 
@@ -138,7 +180,10 @@ def build_server(
         mapping_store: Store for reversible mappings. Defaults to a fresh
             in-process store (demo-design §5 option a).
         name: MCP server name.
+        max_output_bytes: Session-owned maximum restored UTF-8 bytes.
+        max_replacements: Session-owned maximum mapped token occurrences.
     """
+    validate_restoration_input("", max_output_bytes, max_replacements)
     try:
         from mcp.server.fastmcp import FastMCP
     except ImportError as e:  # pragma: no cover - exercised only without the extra
@@ -165,15 +210,17 @@ def build_server(
         )
 
     @server.tool(name=TOOL_UNREDACT)
-    def _unredact(text: str, mapping_id: str) -> str:
+    def _unredact(text: str, mapping_id: str, consume: bool = False) -> str:
         """Restore the original tokens in *text* using *mapping_id*.
 
         Errors if ``mapping_id`` is unknown/expired or was issued for a different
         tenant. Tokens absent from *text* are skipped, so a model that drops or
-        rewords part of the input still round-trips safely.
+        rewords part of the input still round-trips safely. Set ``consume=True``
+        to remove the mapping after successful restoration; subsequent restoration fails.
         """
         return unredact_response(
-            text, mapping_id, mapping_store=store, tenant_id=resolved_tenant
+            text, mapping_id, mapping_store=store, tenant_id=resolved_tenant, consume=consume,
+            max_output_bytes=max_output_bytes, max_replacements=max_replacements,
         )
 
     logger.info(

@@ -14,8 +14,8 @@ class Span:
         end: Exclusive end index into the source text.
         entity_type: Label for the detected entity (e.g. ``"EMAIL"``).
         group: Precedence tier. Lower values have higher precedence; the
-            overlap resolver keeps the span with the lowest group when two
-            spans overlap.
+            overlap resolver uses the lowest group's label while protecting
+            the complete union of overlapping sensitive ranges.
     """
 
     start: int

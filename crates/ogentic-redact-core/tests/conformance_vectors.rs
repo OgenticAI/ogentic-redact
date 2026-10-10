@@ -2,8 +2,8 @@
 //!
 //! Loads `conformance/vectors.json`, redacts each `input` under the file's
 //! fixed `call_salt_hex`, and verifies that `redact_one_way_with_salt` produces
-//! byte-identical `expected_text` / `expected_tokens` AND that `unredact_one_way`
-//! restores the original. Any divergence is a CI failure. The Python / Node /
+//! byte-identical `expected_text`. The explicit mapping helper verifies
+//! `expected_tokens`, and `unredact_one_way` restores the original. Any divergence is a CI failure. The Python / Node /
 //! Swift runners assert the same file, so all four surfaces must agree.
 //!
 //! Run: `cargo test -p ogentic-redact-core --test conformance_vectors`
@@ -28,7 +28,10 @@ struct Vector {
 }
 
 fn decode_hex(s: &str) -> Vec<u8> {
-    assert!(s.len() % 2 == 0, "call_salt_hex must have even length");
+    assert!(
+        s.len().is_multiple_of(2),
+        "call_salt_hex must have even length"
+    );
     (0..s.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("valid hex in call_salt_hex"))
@@ -39,7 +42,7 @@ fn vectors_path() -> PathBuf {
     // CARGO_MANIFEST_DIR = <repo>/crates/ogentic-redact-core
     // vectors.json       = <repo>/conformance/vectors.json  (2 levels up)
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("../../conformance/vectors.json");
+    p.push("tests/fixtures/vectors.json");
     p
 }
 
@@ -66,6 +69,13 @@ fn f3_vectors_rust_surface() {
             "[{}] `text` mismatch\n  input:    {:?}\n  got:      {:?}\n  expected: {:?}",
             v.id, v.input, result.text, v.expected_text
         );
+        let serialized = serde_json::to_value(&result).unwrap();
+        assert!(
+            serialized.get("tokens").is_none(),
+            "one-way response must have no mapping"
+        );
+        let result = ogentic_redact_core::redact_to_mapping_with_salt(&v.input, &salt);
+        assert_eq!(result.text, v.expected_text);
         assert_eq!(
             result.tokens, v.expected_tokens,
             "[{}] `tokens` mismatch\n  input:    {:?}\n  got:      {:?}\n  expected: {:?}",
@@ -73,7 +83,7 @@ fn f3_vectors_rust_surface() {
         );
 
         // Round-trip: unredact must restore the exact input (ADR-0003 §9).
-        let restored = ogentic_redact_core::unredact_one_way(&result.text, &result.tokens);
+        let restored = ogentic_redact_core::unredact_one_way(&result.text, &result.tokens).unwrap();
         assert_eq!(
             restored, v.input,
             "[{}] round-trip mismatch\n  got:      {:?}\n  expected: {:?}",

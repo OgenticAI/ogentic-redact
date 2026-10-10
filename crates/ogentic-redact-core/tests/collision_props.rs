@@ -1,9 +1,9 @@
 //! Property tests for within-call token collision-freedom (OGE-1209 R3 AC).
 //!
-//! The [`TokenAssigner`] gives each distinct `(label, canonical_value)` in one
+//! The [`TokenAssigner`] gives each distinct `(label, exact_original)` in one
 //! call a distinct `[Label_<salted-hex>]` token, extending the discriminator
-//! 8 → 12 hex on the (astronomically rare) 32-bit collision. These properties
-//! assert the observable guarantee through the public one-way API, across many
+//! 8 → 12 hex on the 32-bit collision. These properties
+//! assert the observable guarantee through the explicit mapping API, across many
 //! random value sets and salts:
 //!
 //! 1. distinct values → distinct tokens (no collision merges two originals), and
@@ -15,7 +15,7 @@
 
 use std::collections::HashSet;
 
-use ogentic_redact_core::{redact_one_way_with_salt, unredact_one_way};
+use ogentic_redact_core::{redact_to_mapping_with_salt, unredact_one_way};
 use proptest::prelude::*;
 
 proptest! {
@@ -25,14 +25,14 @@ proptest! {
     fn distinct_values_never_collide_within_a_call(
         // Any-length salt, including empty (HMAC accepts any key length).
         salt in proptest::collection::vec(any::<u8>(), 0..=32),
-        // A set of distinct, lowercase email local-parts → distinct emails.
-        locals in proptest::collection::hash_set("[a-z][a-z0-9]{0,9}", 1..40),
+        // A set of distinct, mixed-case email local-parts → distinct emails.
+        locals in proptest::collection::hash_set("[a-zA-Z][a-zA-Z0-9]{0,9}", 1..40),
     ) {
         let emails: Vec<String> =
             locals.iter().map(|l| format!("{l}@example.com")).collect();
         let text = emails.join(" and ");
 
-        let result = redact_one_way_with_salt(&text, &salt);
+        let result = redact_to_mapping_with_salt(&text, &salt);
 
         // (1a) Every distinct email is detected and gets its own map entry.
         prop_assert_eq!(
@@ -56,13 +56,13 @@ proptest! {
         }
 
         // (2) Round-trip restores the exact input.
-        prop_assert_eq!(unredact_one_way(&result.text, &result.tokens), text);
+        prop_assert_eq!(unredact_one_way(&result.text, &result.tokens).unwrap(), text);
     }
 
     #[test]
     fn repeated_value_collapses_to_one_token(
         salt in proptest::collection::vec(any::<u8>(), 0..=32),
-        local in "[a-z][a-z0-9]{0,9}",
+        local in "[a-zA-Z][a-zA-Z0-9]{0,9}",
         repeats in 2usize..8,
     ) {
         // The same email repeated N times must yield exactly one token (stable
@@ -70,9 +70,9 @@ proptest! {
         let email = format!("{local}@example.com");
         let text = vec![email.as_str(); repeats].join(", ");
 
-        let result = redact_one_way_with_salt(&text, &salt);
+        let result = redact_to_mapping_with_salt(&text, &salt);
 
         prop_assert_eq!(result.tokens.len(), 1, "same value must reuse one token");
-        prop_assert_eq!(unredact_one_way(&result.text, &result.tokens), text);
+        prop_assert_eq!(unredact_one_way(&result.text, &result.tokens).unwrap(), text);
     }
 }

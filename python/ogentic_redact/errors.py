@@ -29,7 +29,7 @@ class ClassifierError(RedactError):
 
     Wraps transport/parse failures behind a sanitised message so raw adapter
     errors (URLs, upstream response bodies) are never surfaced to the caller
-    (CLAUDE.md §4). The underlying cause is chained for local logging only.
+    (CLAUDE.md §4). External exception payloads are suppressed at this boundary.
     """
 
 
@@ -43,10 +43,10 @@ class AuditError(RedactError):
 
 
 class LocalhostOnlyError(Exception):
-    """Raised when a cloud recogniser is requested without explicit opt-in.
+    """Legacy exception available for caller-enforced classifier policy.
 
-    The default redaction path enforces on-device-only execution.
-    Cloud-assisted recognisers require explicit `cloud=True` opt-in.
+    The default span path is local, but Redactor does not sandbox injected
+    classifiers or raise this exception automatically.
     """
 
     def __init__(self) -> None:
