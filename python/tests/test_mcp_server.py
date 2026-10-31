@@ -120,3 +120,82 @@ class TestServerWiring:
 
     def test_default_tenant_constant(self) -> None:
         assert DEFAULT_TENANT == "local"
+
+
+def test_mcp_consume_is_scoped_and_single_use() -> None:
+    store = InProcessMappingStore()
+    result = redact_outbound(SAMPLE, "shield-legal", mapping_store=store, tenant_id=TENANT)
+    with pytest.raises(ValueError, match="unknown or expired"):
+        unredact_response(result["redacted"], result["mapping_id"], mapping_store=store, tenant_id="other", consume=True)
+    assert unredact_response(result["redacted"], result["mapping_id"], mapping_store=store, tenant_id=TENANT, consume=True) == SAMPLE
+    with pytest.raises(ValueError, match="unknown or expired"):
+        unredact_response(result["redacted"], result["mapping_id"], mapping_store=store, tenant_id=TENANT)
+
+
+def test_mcp_store_failures_hide_sensitive_error_payloads(caplog) -> None:
+    class BrokenStore(InProcessMappingStore):
+        def store(self, mapping, matter_id):
+            raise RuntimeError("secret-alice@example.com")
+        def fetch(self, mapping_id, matter_id):
+            raise RuntimeError("secret-alice@example.com")
+    store = BrokenStore()
+    with pytest.raises(ValueError, match="outbound redaction unavailable"):
+        redact_outbound(SAMPLE, "shield-legal", mapping_store=store, tenant_id=TENANT)
+    with pytest.raises(ValueError, match="mapping store unavailable"):
+        unredact_response("text", "id", mapping_store=store, tenant_id=TENANT)
+    assert "secret-alice@example.com" not in caplog.text
+
+
+def test_mcp_invalid_unicode_does_not_consume_vault_through_tool() -> None:
+    pytest.importorskip("mcp")
+    import anyio
+    from mcp.server.fastmcp.exceptions import ToolError
+    from ogentic_redact.mcp.server import build_server
+
+    store = InProcessMappingStore()
+    result = redact_outbound(SAMPLE, "shield-legal", mapping_store=store, tenant_id=TENANT)
+    original_mapping = store.fetch(result["mapping_id"], TENANT)
+    server = build_server(tenant_id=TENANT, mapping_store=store)
+
+    async def invoke():
+        await server.call_tool(TOOL_UNREDACT, {
+            "text": "\ud800", "mapping_id": result["mapping_id"], "consume": True,
+        })
+
+    with pytest.raises(ToolError, match="valid UTF-8"):
+        anyio.run(invoke)
+    assert store.fetch(result["mapping_id"], TENANT) == original_mapping
+
+
+def test_mcp_over_budget_response_keeps_mapping_for_valid_retry() -> None:
+    store = InProcessMappingStore()
+    result = redact_outbound(SAMPLE, "shield-legal", mapping_store=store, tenant_id=TENANT)
+    original_mapping = store.fetch(result["mapping_id"], TENANT)
+    with pytest.raises(ValueError, match="response restoration unavailable"):
+        unredact_response(
+            result["redacted"], result["mapping_id"], mapping_store=store,
+            tenant_id=TENANT, consume=True, max_output_bytes=4,
+        )
+    assert store.fetch(result["mapping_id"], TENANT) == original_mapping
+    assert unredact_response(
+        result["redacted"], result["mapping_id"], mapping_store=store,
+        tenant_id=TENANT, consume=True,
+    ) == SAMPLE
+
+
+def test_mcp_unexpected_restore_failure_keeps_mapping(monkeypatch) -> None:
+    import ogentic_redact.mcp.server as module
+    store = InProcessMappingStore()
+    result = redact_outbound(SAMPLE, "shield-legal", mapping_store=store, tenant_id=TENANT)
+    original_mapping = store.fetch(result["mapping_id"], TENANT)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("sensitive-payload")
+
+    monkeypatch.setattr(module._native, "unredact", fail)
+    with pytest.raises(ValueError, match="^response restoration unavailable$"):
+        unredact_response(
+            result["redacted"], result["mapping_id"], mapping_store=store,
+            tenant_id=TENANT, consume=True,
+        )
+    assert store.fetch(result["mapping_id"], TENANT) == original_mapping

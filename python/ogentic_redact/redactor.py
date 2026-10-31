@@ -3,16 +3,25 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import math
 import os
+import re
 import warnings
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from ogentic_redact._restoration import (
+    DEFAULT_MAX_OUTPUT_BYTES,
+    DEFAULT_MAX_REPLACEMENTS,
+    restore_mapping,
+    validate_restoration_input,
+)
 from ogentic_redact.audit import AuditDetectionEvent, AuditEmitter
 from ogentic_redact.classifier import DEFAULT_MIN_CONFIDENCE
-from ogentic_redact.errors import AuditError
+from ogentic_redact.errors import AuditError, ClassifierError, MappingNotFound
 from ogentic_redact.logging import log_structured
 from ogentic_redact.span import Span
 
@@ -47,7 +56,7 @@ class Redactor:
     * **One-way** (default): each span is replaced with a bracketed entity
       label, e.g. ``[EMAIL]``.  The original value cannot be recovered.
     * **Reversible** (``reversible=True``): each span is replaced with a
-      salted opaque token, e.g. ``[RTKN_3a7f9c12ab01]``, and the mapping is
+      salted opaque token with a 128-bit discriminator, and the mapping is
       stored in a separate MappingStore. An opaque mapping_id is returned; the
       original plaintext mapping is never returned inline.
 
@@ -61,10 +70,10 @@ class Redactor:
         :class:`~ogentic_redact.classifier.ClassifierProtocol`.
 
     Cloud recognisers:
-        By default, the redactor operates on-device only (localhost). Cloud-
-        assisted recognisers require explicit ``cloud=True`` opt-in and emit a
-        first-use runtime warning. Attempting to use cloud recognisers without
-        the flag raises :class:`LocalhostOnlyError`.
+        Caller-supplied spans are processed locally. Injected classifiers own
+        their network behavior; ``cloud=False`` does not sandbox them. The
+        compatibility ``cloud=True`` flag emits a first-use warning but does
+        not configure a recogniser. ShieldAdapter is an explicit HTTP path.
 
     Audit:
         When an ``audit_emitter`` is passed to :meth:`redact`, one audit
@@ -87,6 +96,13 @@ class Redactor:
         classifier: ClassifierProtocol | None = None,
         min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     ) -> None:
+        if (
+            isinstance(min_confidence, bool)
+            or not isinstance(min_confidence, (int, float))
+            or not math.isfinite(min_confidence)
+            or not 0.0 <= min_confidence <= 1.0
+        ):
+            raise ValueError("min_confidence must be a finite number in [0, 1]")
         self.reversible = reversible
         self.cloud = cloud
         self.mapping_store = mapping_store
@@ -139,21 +155,22 @@ class Redactor:
             TypeError: If *text* is not a :class:`str`.
             ValueError: If any span has ``start < 0``, ``end > len(text)``,
                 or ``start >= end``, or if vault storage fails.
-            LocalhostOnlyError: If a cloud recogniser is requested without
-                explicit ``cloud=True`` opt-in.
             AuditError: If *audit_emitter* is provided and event emission fails
                 (fail-closed).
         """
         if not isinstance(text, str):
             raise TypeError(f"text must be str, got {type(text).__name__!r}")
+        if spans is not None and not isinstance(spans, list):
+            raise ValueError("spans must be a list of Span objects")
 
         if self.cloud:
             global _cloud_warned
             if not _cloud_warned:
                 warnings.warn(
-                    "Cloud-assisted recognisers are enabled. Sensitive data may be "
-                    "sent to external services. Disable with cloud=False to enforce "
-                    "on-device-only redaction.",
+                    "Cloud-assisted classification was requested. Injected classifiers "
+                    "may send sensitive data to external services. This flag does not "
+                    "configure or sandbox classifiers; use a trusted local classifier "
+                    "or supply spans for local-only processing.",
                     UserWarning,
                     stacklevel=2,
                 )
@@ -167,10 +184,23 @@ class Redactor:
             spans = spans or []
 
         for span in spans:
-            if span.start < 0 or span.end > len(text) or span.start >= span.end:
+            if not isinstance(span, Span):
+                raise ValueError("spans must contain Span objects")
+            if (
+                type(span.start) is not int
+                or type(span.end) is not int
+                or type(span.group) is not int
+                or span.start < 0
+                or span.end > len(text)
+                or span.start >= span.end
+            ):
                 raise ValueError(
-                    f"Invalid span [{span.start}:{span.end}] for text of length {len(text)}"
+                    "Invalid span coordinates or precedence"
                 )
+            if not isinstance(span.entity_type, str) or not re.fullmatch(
+                r"[A-Za-z][A-Za-z0-9_]{0,127}", span.entity_type
+            ):
+                raise ValueError("Invalid span entity type")
 
         resolved = self.resolve_overlaps(spans)
 
@@ -186,6 +216,7 @@ class Redactor:
         vault_dict: dict[str, str] = {}
         # Within-call stability: same (value, entity_type) → same token.
         _seen: dict[tuple[str, str], str] = {}
+        source_text = text
 
         # Replace right-to-left so earlier indices stay valid.
         for span in sorted(resolved, key=lambda s: s.start, reverse=True):
@@ -195,9 +226,15 @@ class Redactor:
                 key = (value, span.entity_type)
                 if key not in _seen:
                     digest = hashlib.sha256(
-                        f"{salt}:{value}:{span.entity_type}".encode()
-                    ).hexdigest()[:12]
+                        json.dumps([salt, value, span.entity_type]).encode()
+                    ).hexdigest()[:32]
                     token = f"[RTKN_{digest}]"
+                    # Never turn pre-existing token-shaped source text into an
+                    # accidental reference, or overwrite another mapped value.
+                    collision = 0
+                    while token in source_text or token in vault_dict:
+                        collision += 1
+                        token = f"[RTKN_{digest}{collision:08x}]"
                     _seen[key] = token
                     vault_dict[token] = value
                 else:
@@ -213,8 +250,8 @@ class Redactor:
             assert self.mapping_store is not None
             try:
                 mapping_id = self.mapping_store.store(vault_dict, matter_id)
-            except Exception as e:
-                raise ValueError("MappingStore storage failed (details hidden)") from e
+            except Exception:
+                raise ValueError("MappingStore storage failed (details hidden)") from None
 
         result = RedactResult(text=text, vault={}, mapping_id=mapping_id)
 
@@ -233,6 +270,22 @@ class Redactor:
                 try:
                     audit_emitter.emit(event)
                 except Exception as e:
+                    if mapping_id is not None:
+                        assert self.mapping_store is not None
+                        try:
+                            self.mapping_store.delete(mapping_id, matter_id)
+                        except MappingNotFound:
+                            # An expiry/deletion during auditing already ended retention.
+                            pass
+                        except Exception as cleanup_error:
+                            log_structured(
+                                logging.ERROR,
+                                "mapping rollback failed",
+                                tenant_id=tenant_id,
+                                request_id=request_id,
+                                op="redact",
+                                error_type=type(cleanup_error).__name__,
+                            )
                     log_structured(
                         logging.ERROR,
                         "audit event emission failed",
@@ -240,11 +293,11 @@ class Redactor:
                         request_id=request_id,
                         op="redact",
                         entity_type=entity_type,
-                        error=str(e),
+                        error_type=type(e).__name__,
                     )
                     raise AuditError(
                         "audit event recording failed; redaction not completed"
-                    ) from e
+                    ) from None
 
         return result
 
@@ -258,6 +311,14 @@ class Redactor:
         """
         assert self.classifier is not None  # guarded by the caller
         classified = self.classifier.classify(text, profile)
+        if not isinstance(classified, list):
+            raise ClassifierError("malformed classifier response")
+        from ogentic_redact.classifier import RedactSpan
+
+        for span in classified:
+            if not isinstance(span, RedactSpan):
+                raise ClassifierError("malformed classifier span")
+            span.validate_source(text)
         return [rs.to_span() for rs in classified if rs.confidence >= self.min_confidence]
 
     def unredact(
@@ -265,6 +326,10 @@ class Redactor:
         redacted_text: str,
         mapping_id: str,
         matter_id: str = "",
+        *,
+        consume: bool = False,
+        max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
+        max_replacements: int = DEFAULT_MAX_REPLACEMENTS,
     ) -> str:
         """Restore original text from *redacted_text* using vault lookup.
 
@@ -272,6 +337,12 @@ class Redactor:
             redacted_text: A string previously returned by :meth:`redact`.
             mapping_id: The :attr:`RedactResult.mapping_id` from the same call.
             matter_id: Tenant/matter identifier. Must match the one passed to redact().
+            consume: Atomically remove the mapping after successful restoration. Defaults
+                to False so repeated responses can share a mapping until deletion
+                or expiry. Unused tokens are skipped in partial LLM responses.
+            max_output_bytes: Maximum restored UTF-8 bytes (default 16 MiB).
+            max_replacements: Maximum mapped token occurrences (default 100,000).
+                Rejected restoration leaves the mapping available.
 
         Returns:
             The original text with all tokens substituted back.
@@ -281,60 +352,67 @@ class Redactor:
                 ``reversible=True``, or if mapping_id is not found under matter_id,
                 or if vault access fails.
             TypeError: If *redacted_text* is not a :class:`str`.
-            KeyError: If a vault token is not present in *redacted_text*.
         """
         if not self.reversible:
             raise ValueError("unredact() requires Redactor(reversible=True)")
-        if not isinstance(redacted_text, str):
-            raise TypeError(
-                f"redacted_text must be str, got {type(redacted_text).__name__!r}"
-            )
+        validate_restoration_input(redacted_text, max_output_bytes, max_replacements)
 
         # Invariant: reversible mode always has a vault (see __init__).
         assert self.mapping_store is not None
         try:
             vault_dict = self.mapping_store.fetch(mapping_id, matter_id)
-        except Exception as e:
-            raise ValueError(
-                f"Unable to restore mapping_id={mapping_id!r} under matter_id={matter_id!r}"
-            ) from e
+        except Exception:
+            raise ValueError("Unable to restore mapping: unavailable, unknown or expired") from None
 
-        result = redacted_text
-        for token, original in vault_dict.items():
-            if token not in result:
-                raise KeyError(f"Token {token!r} not found in redacted text")
-            result = result.replace(token, original)
-
-        return result
+        restored = restore_mapping(
+            redacted_text, vault_dict,
+            max_output_bytes=max_output_bytes, max_replacements=max_replacements,
+        )
+        if consume:
+            try:
+                # IDs identify immutable records. Only the successful atomic
+                # consumer may return a result, even if several callers fetched.
+                consumed = self.mapping_store.consume(mapping_id, matter_id)
+                if consumed != vault_dict:
+                    raise ValueError("mapping changed during restoration")
+            except Exception:
+                raise ValueError("Unable to restore mapping: unavailable, unknown or expired") from None
+        return restored
 
     @staticmethod
     def resolve_overlaps(spans: list[Span]) -> list[Span]:
-        """Return a non-overlapping subset of *spans*.
+        """Protect the union of each connected group of overlapping spans.
 
-        When two spans overlap, the one with the **lower group** number
-        (higher precedence) is kept.  For equal groups the span with the
-        earlier start position is kept.  The returned list is sorted by
-        ``start`` ascending.
+        Every detected character remains covered. Each region takes its label
+        from the span ranked first by lower group number, earlier start, longer
+        length, then entity type. Label selection uses the original spans and
+        is independent of their input order. Adjacent spans remain separate.
 
         Args:
             spans: Arbitrary collection of :class:`Span` objects.
 
         Returns:
-            A list of non-overlapping :class:`Span` objects sorted by start
-            position.
+            Non-overlapping protected regions sorted by start. A merged region
+            counts as one redaction and, in reversible mode, stores its complete
+            original substring so restoration preserves the exact input.
         """
         if not spans:
             return []
 
-        # Process highest-priority spans first (lowest group, then earliest start).
-        by_priority = sorted(spans, key=lambda s: (s.group, s.start))
+        def priority(span: Span) -> tuple[int, int, int, str]:
+            return span.group, span.start, -(span.end - span.start), span.entity_type
 
-        accepted: list[Span] = []
-        covered: list[tuple[int, int]] = []
-
-        for span in by_priority:
-            if not any(span.start < end and span.end > start for start, end in covered):
-                accepted.append(span)
-                covered.append((span.start, span.end))
-
-        return sorted(accepted, key=lambda s: s.start)
+        ordered = sorted(spans, key=lambda span: (span.start, span.end))
+        winner = ordered[0]
+        start, end = winner.start, winner.end
+        resolved: list[Span] = []
+        for span in ordered[1:]:
+            if span.start >= end:
+                resolved.append(Span(start, end, winner.entity_type, winner.group))
+                start, end, winner = span.start, span.end, span
+                continue
+            end = max(end, span.end)
+            if priority(span) < priority(winner):
+                winner = span
+        resolved.append(Span(start, end, winner.entity_type, winner.group))
+        return resolved

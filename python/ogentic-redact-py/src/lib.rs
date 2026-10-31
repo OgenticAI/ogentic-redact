@@ -1,67 +1,104 @@
-//! PyO3 binding for `ogentic-redact`.
-//!
-//! Exposes:
-//! - `__version__` — library version string.
-//! - `redact(text) -> dict` — one-way redaction; returns
-//!   `{"text": str, "tokens": dict[str, str]}`.
-//! - `unredact(text, tokens) -> str` — restore redacted text from the token map.
-
+//! Python one-way primitives. Raw mapping adapters are private to the package.
+use ogentic_redact_core::{RestorationLimits, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_MAX_REPLACEMENTS};
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyBool, PyDict, PyInt};
 use std::collections::HashMap;
 
-/// `_native` Python extension module.
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(redact, m)?)?;
     m.add_function(wrap_pyfunction!(redact_with_salt, m)?)?;
     m.add_function(wrap_pyfunction!(unredact, m)?)?;
+    m.add_function(wrap_pyfunction!(_redact_to_mapping, m)?)?;
+    m.add_function(wrap_pyfunction!(_redact_to_mapping_with_salt, m)?)?;
     Ok(())
 }
 
-/// Build the `{"text", "tokens"}` dict from a core result.
-fn result_to_dict<'py>(
-    py: Python<'py>,
-    result: &ogentic_redact_core::RedactOneWayResult,
-) -> PyResult<Bound<'py, PyDict>> {
+fn result_to_dict(
+    py: Python<'_>,
+    result: ogentic_redact_core::RedactOneWayResult,
+) -> PyResult<Bound<'_, PyDict>> {
     let d = PyDict::new(py);
-    d.set_item("text", &result.text)?;
-    let tokens_dict = PyDict::new(py);
-    for (k, v) in &result.tokens {
-        tokens_dict.set_item(k, v)?;
-    }
-    d.set_item("tokens", tokens_dict)?;
+    d.set_item("text", result.text)?;
+    d.set_item("redaction_count", result.redaction_count)?;
     Ok(d)
 }
 
-/// Redact PII in `text` (ADR-0003 grammar `[Label_<salted-hex>]`).
-///
-/// Returns a dict ``{"text": str, "tokens": dict[str, str]}`` where ``text``
-/// is the redacted string and ``tokens`` maps each placeholder (e.g.
-/// ``"[Email_3f8a2c1b]"``) to the original value it replaced. Uses a fresh
-/// per-call salt; use :func:`redact_with_salt` for reproducible output.
-#[pyfunction]
-fn redact<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyDict>> {
-    result_to_dict(py, &ogentic_redact_core::redact_one_way(text))
+fn mapping_to_dict(
+    py: Python<'_>,
+    result: ogentic_redact_core::RedactMappingResult,
+) -> PyResult<Bound<'_, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("text", result.text)?;
+    d.set_item("tokens", result.tokens)?;
+    Ok(d)
 }
 
-/// Like :func:`redact`, but with an explicit ``salt`` (bytes) so the salted-hex
-/// tokens are reproducible. Surfaces sharing the same salt produce byte-identical
-/// output — the basis of the cross-language conformance vectors.
+/// One-way result containing text and a count, never original values.
+#[pyfunction]
+fn redact<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyDict>> {
+    result_to_dict(py, ogentic_redact_core::redact_one_way(text))
+}
+
 #[pyfunction]
 fn redact_with_salt<'py>(py: Python<'py>, text: &str, salt: &[u8]) -> PyResult<Bound<'py, PyDict>> {
     result_to_dict(
         py,
-        &ogentic_redact_core::redact_one_way_with_salt(text, salt),
+        ogentic_redact_core::redact_one_way_with_salt(text, salt),
     )
 }
 
-/// Restore redacted placeholders in `text` using `tokens`.
-///
-/// `tokens` must be the dict from the ``"tokens"`` field of a prior
-/// :func:`redact` call.
+/// INTERNAL: sensitive result for trusted mapping-store adapters; never forward inline.
 #[pyfunction]
-fn unredact(_py: Python<'_>, text: &str, tokens: HashMap<String, String>) -> PyResult<String> {
-    Ok(ogentic_redact_core::unredact_one_way(text, &tokens))
+fn _redact_to_mapping<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyDict>> {
+    mapping_to_dict(py, ogentic_redact_core::redact_to_mapping(text))
+}
+
+/// INTERNAL: deterministic sensitive result for mapping-store conformance.
+#[pyfunction]
+fn _redact_to_mapping_with_salt<'py>(
+    py: Python<'py>,
+    text: &str,
+    salt: &[u8],
+) -> PyResult<Bound<'py, PyDict>> {
+    mapping_to_dict(
+        py,
+        ogentic_redact_core::redact_to_mapping_with_salt(text, salt),
+    )
+}
+
+/// Strict Python integer budget (bool and float are not accepted).
+struct NonNegativeLimit(usize);
+impl FromPyObject<'_, '_> for NonNegativeLimit {
+    type Error = PyErr;
+    fn extract(obj: Borrowed<'_, '_, PyAny>) -> PyResult<Self> {
+        if obj.is_instance_of::<PyBool>() || !obj.is_instance_of::<PyInt>() {
+            return Err(PyTypeError::new_err(
+                "restoration limits must be nonnegative integers",
+            ));
+        }
+        obj.extract::<usize>().map(Self).map_err(|_| {
+            PyValueError::new_err("restoration limits must be nonnegative platform-sized integers")
+        })
+    }
+}
+
+#[pyfunction(signature = (text, tokens, *, max_output_bytes=NonNegativeLimit(DEFAULT_MAX_OUTPUT_BYTES), max_replacements=NonNegativeLimit(DEFAULT_MAX_REPLACEMENTS)))]
+fn unredact(
+    text: &str,
+    tokens: HashMap<String, String>,
+    max_output_bytes: NonNegativeLimit,
+    max_replacements: NonNegativeLimit,
+) -> PyResult<String> {
+    ogentic_redact_core::unredact_one_way_with_limits(
+        text,
+        &tokens,
+        RestorationLimits {
+            max_output_bytes: max_output_bytes.0,
+            max_replacements: max_replacements.0,
+        },
+    )
+    .map_err(|error| PyValueError::new_err(error.to_string()))
 }

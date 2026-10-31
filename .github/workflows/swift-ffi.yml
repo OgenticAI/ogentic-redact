@@ -7,12 +7,14 @@ on:
       - "crates/ogentic-redact-ffi/**"
       - "swift/OgenticRedact/**"
       - "scripts/build-swift-ffi.sh"
+      - "scripts/test-swift-consumer.sh"
       - ".github/workflows/swift-ffi.yml"
   pull_request:
     paths:
       - "crates/ogentic-redact-ffi/**"
       - "swift/OgenticRedact/**"
       - "scripts/build-swift-ffi.sh"
+      - "scripts/test-swift-consumer.sh"
       - ".github/workflows/swift-ffi.yml"
 
 jobs:
@@ -47,3 +49,6 @@ jobs:
 
       - name: Swift tests (F3 golden vectors)
         run: swift test --package-path swift/OgenticRedact
+
+      - name: Test an independent SwiftPM consumer
+        run: bash scripts/test-swift-consumer.sh

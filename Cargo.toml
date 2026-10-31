@@ -12,8 +12,8 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-# Floor set by pyo3 0.29, which declares rust-version = "1.83".
-rust-version = "1.83"
+# The locked napi-build dependency requires 1.88; CI checks every target at this floor.
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/OgenticAI/ogentic-redact"
 homepage = "https://github.com/OgenticAI/ogentic-redact"

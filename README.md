@@ -71,7 +71,7 @@ npm install @ogenticai/redact-win32-x64-msvc # Windows x64
 
 ```toml
 [dependencies]
-ogentic-redact = "0.1"
+ogentic-redact-core = "0.1"
 ```
 
 ---
@@ -89,7 +89,7 @@ echo "Send the report to alice@example.com by Friday." | ogentic-redact -
 # Send the report to [Email_3f8a2c1b] by Friday.
 ```
 
-Each call uses a fresh 128-bit random salt — tokens from different calls never collide, even for identical input values.
+Each native redaction call uses a fresh 128-bit random salt. This reduces cross-call correlation; shortened token discriminators are not a guarantee of global uniqueness. One-way results contain redacted text and a detection count, never a reversal mapping.
 
 ### Reversible round-trip
 
@@ -138,7 +138,7 @@ Both libraries can redact text, but they solve different problems:
 |-----------|-----------------|---------------------------|
 | **Mapping location** | Separate vault — opaque `mapping_id`, never inline | Inline in response `{"mapping": {...}}` |
 | **Reversibility** | Explicit opt-in: `Redactor(reversible=True)` | No — one-way only |
-| **Salt / de-correlation** | Per-call 128-bit random salt; tokens disjoint across calls | None |
+| **Salt / de-correlation** | Per-call random salt; probabilistic cross-call de-correlation | None |
 | **Category-aware defaults** | `Profile` system — `DEFAULT_ENTITY_TYPES`, `KNOWN_PROFILES` | Fixed entity set |
 | **On-device guarantee** | Default path: zero network calls | Depends on shield configuration |
 
@@ -162,11 +162,43 @@ profile = Profile.from_shield_profile("shield-legal")
 print(profile.entity_types)
 ```
 
-Cloud-assisted recognisers are available as an optional extra and emit a runtime warning on first use:
+Named profiles describe policy; they do not install local recognizers. Local
+streaming validates every requested entity against its analyzer and fails before
+output when a recognizer is missing. The stock local analyzer cannot fulfill
+`shield-legal`'s CASE_NUMBER/BATES_NUMBER entities; use Shield classification for
+that workflow. An explicit empty entity selection performs no detection.
+
+Shield HTTP classification is an explicit optional integration:
 
 ```bash
-pip install 'ogentic-redact[cloud]'
+pip install 'ogentic-redact[shield]'
 ```
+
+`ShieldAdapter` sends the original text to the configured service. Use a local
+Shield service for local processing. The `cloud` flag is not a network sandbox
+for caller-supplied classifiers; there is no `[cloud]` extra.
+
+### Finalized transcript records
+
+`redact_stream(chunks, profile)` buffers one finite record until its input ends,
+then classifies and audits it before yielding redacted chunks. This prevents an
+email, phone number, or other entity split across transport chunks from leaking
+its prefix. Live integrations should call it for each **finalized utterance**.
+The default limits are 100,000 characters and 4,096 chunks; exceeding either
+raises without releasing output. Detection still depends on the local model.
+
+Install the streaming model explicitly during setup:
+
+```bash
+python -m spacy download en_core_web_sm
+```
+
+Runtime initialization never downloads a missing model. See the [API guide](docs/api-guide.md)
+for retention controls, native reversible sessions, and the pre-release API migration.
+
+Restoration defaults to a 16 MiB UTF-8 output limit and 100,000 mapped replacements.
+Configure larger budgets explicitly when needed. Invalid or oversized responses
+leave the mapping available for retry. Source builds require Rust 1.88 or newer.
 
 ---
 
@@ -183,6 +215,7 @@ Supported platforms: macOS arm64, Linux x64, Windows x64.
 ## Further reading
 
 - [API guide — modes, salt, and the mapping-id lifecycle](docs/api-guide.md)
+- [ADR-0004 — Privacy contract corrections and migration](docs/adr/0004-privacy-contract-hardening.md)
 - [ADR-0003 — Ecosystem token grammar (Shield-aligned)](docs/adr/0003-ecosystem-token-grammar.md)
 - [ADR-0002 — Stack: Rust core with bindings](docs/adr/0002-stack-rust-core-with-bindings.md)
 - [Threat model](docs/threat-model.md)

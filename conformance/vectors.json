@@ -1,6 +1,6 @@
 {
   "call_salt_hex": "000102030405060708090a0b0c0d0e0f",
-  "description": "F4 golden vectors — cross-language conformance for the ADR-0003 token grammar `[Label_<salted-hex>]`. Every surface (Rust, Python, Node.js, Swift), given `input` and the fixed `call_salt_hex`, must produce byte-identical `expected_text` and `expected_tokens`, and must round-trip (unredact restores `input`).",
+  "description": "F4 golden vectors — cross-language conformance for the ADR-0003 token grammar `[Label_<salted-hex>]`. Every surface (Rust, Python, Node.js, Swift), given `input` and the fixed `call_salt_hex`, must produce byte-identical `expected_text`; explicit reversible test helpers verify `expected_tokens` and must round-trip (unredact restores `input`).",
   "vectors": [
     {
       "description": "Single email in a sentence",
@@ -133,6 +133,35 @@
       "expected_tokens": {},
       "id": "ssn-not-adjacent-digit-015",
       "input": "Code 1123-45-6789 is not an SSN."
+    },
+    {
+      "description": "Distinct original case variants retain separate tokens and exact restoration",
+      "expected_text": "[Email_6786c6cf] [Email_69cdedcc] [Email_f39a6c2e].",
+      "expected_tokens": {
+        "[Email_6786c6cf]": "Alice@example.com",
+        "[Email_69cdedcc]": "alice@example.com",
+        "[Email_f39a6c2e]": "ALICE@example.com"
+      },
+      "id": "mixed-case-originals-016",
+      "input": "Alice@example.com alice@example.com ALICE@example.com."
+    },
+    {
+      "description": "A source token matching a candidate is reserved and remains literal after restoration",
+      "expected_text": "[Email_69cdedcc4bbe] example:[Email_69cdedcc] [Email_69cdedcc4bbe]",
+      "expected_tokens": {
+        "[Email_69cdedcc4bbe]": "alice@example.com"
+      },
+      "id": "literal-token-reservation-017",
+      "input": "alice@example.com example:[Email_69cdedcc] alice@example.com"
+    },
+    {
+      "description": "Repeated exact originals share one token and restore every occurrence",
+      "expected_text": "[Email_69cdedcc] and [Email_69cdedcc]",
+      "expected_tokens": {
+        "[Email_69cdedcc]": "alice@example.com"
+      },
+      "id": "repeated-value-018",
+      "input": "alice@example.com and alice@example.com"
     }
   ],
   "version": "f4"

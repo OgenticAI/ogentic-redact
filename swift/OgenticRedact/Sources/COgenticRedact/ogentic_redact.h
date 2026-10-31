@@ -1,201 +1,70 @@
 /**
- * ogentic_redact.h — stable C ABI for the ogentic-redact-ffi library.
- *
- * This header is the boundary between `ogentic-redact-ffi` (a Rust crate
- * compiled to a static library) and the Swift `OgenticRedact` package.
- * It is regenerated from the Rust source via `cbindgen` and then checked in
- * so the Swift package can compile without a local Rust build.
- *
- * Run `scripts/build-swift-ffi.sh` to rebuild both the static library and
- * this header from source.
- *
- * ABI STABILITY GUARANTEE
- * -----------------------
- * The function signatures and struct layouts below are stable.  New
- * functionality is added in new functions; existing signatures are never
- * changed in a breaking way without a major version bump.
- *
- * MEMORY OWNERSHIP
- * ----------------
- * Every pointer returned by this library was allocated on the Rust heap.
- * Callers MUST free it with `ogentic_redact_free` — NOT with `free()` or
- * Swift's / C's allocators.  Double-free and use-after-free are undefined
- * behaviour.  A `null` return always means an error occurred; `*out_len` is
- * set to `0` in that case.
+ * C ABI for on-device redaction. The built-in EMAIL/PHONE/US_SSN scanner is
+ * a development convenience. This header is maintained with the Rust exports.
+ * Every returned buffer must be freed with ogentic_redact_free(ptr, length).
+ * Byte inputs use explicit UTF-8 lengths. NULL input is accepted only at length 0.
+ * Handles must be closed exactly once; never close while another call uses them.
  */
-
 #ifndef OGENTIC_REDACT_H
 #define OGENTIC_REDACT_H
-
 #include <stddef.h>
 #include <stdint.h>
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* ── version ──────────────────────────────────────────────────────────────── */
-
-/**
- * Returns the library version as a null-terminated UTF-8 string.
- *
- * The caller MUST NOT free the returned pointer — it points to a static
- * string owned by the Rust runtime.
- */
-const char *ogentic_redact_version(void);
-
-/* ── memory ───────────────────────────────────────────────────────────────── */
-
-/**
- * Free a buffer previously returned by `ogentic_redact` or
- * `ogentic_unredact` or `ogentic_redact_stream_next`.
- *
- * @param ptr  Pointer returned by the library.  Ignored if NULL.
- * @param len  Byte length as reported by the corresponding `*out_len`.
- */
+const char *ogentic_redact_version(void); /* static: do not free */
 void ogentic_redact_free(uint8_t *ptr, size_t len);
 
-/* ── synchronous API ──────────────────────────────────────────────────────── */
+/* One-way JSON: {"text": string, "redaction_count": number}. No plaintext map. */
+uint8_t *ogentic_redact(const uint8_t *input, size_t input_len, size_t *out_len);
+uint8_t *ogentic_redact_with_salt(const uint8_t *input, size_t input_len,
+    const uint8_t *salt, size_t salt_len, size_t *out_len);
 
-/**
- * Redact PII in `input` (ADR-0003 grammar).
- *
- * Scans `input` for recognisable PII patterns (email, US phone, SSN) and
- * replaces each with a salted placeholder token such as `[Email_3f8a2c1b]`.
- * A fresh per-call salt is used, so the same value redacts differently across
- * calls; use `ogentic_redact_with_salt` for reproducible output.
- *
- * Returns a heap-allocated JSON byte buffer of the form:
- * ```json
- * {
- *   "text":   "Contact [Email_3f8a2c1b] for info.",
- *   "tokens": { "[Email_3f8a2c1b]": "alice@example.com" }
- * }
- * ```
- * Sets `*out_len` to the byte length of the buffer (it is NOT
- * null-terminated).  Returns NULL on error (invalid UTF-8, OOM).
- *
- * The caller must free the returned buffer with `ogentic_redact_free`.
- *
- * No network calls are made.
- *
- * @param input      Pointer to UTF-8 encoded input bytes.
- * @param input_len  Length of `input` in bytes.
- * @param out_len    Set to the byte length of the returned buffer on success,
- *                   0 on error.
- * @return           Heap-allocated buffer, or NULL on error.
- */
-uint8_t *ogentic_redact(const uint8_t *input,
-                         size_t         input_len,
-                         size_t        *out_len);
+/* Default restoration budgets: 16 MiB UTF-8 bytes and 100000 mapped occurrences.
+ * Status: 0 success, 1 missing mapping, 2 limit exceeded, 3 invalid input, 4 allocation failure. */
+#define OGENTIC_RESTORE_OK 0
+#define OGENTIC_RESTORE_MAPPING_NOT_FOUND 1
+#define OGENTIC_RESTORE_LIMIT_EXCEEDED 2
+#define OGENTIC_RESTORE_INVALID_INPUT 3
+#define OGENTIC_RESTORE_ALLOCATION_FAILED 4
+/* Legacy explicit-map restoration with the default limits. */
+uint8_t *ogentic_unredact(const uint8_t *input, size_t input_len,
+    const uint8_t *token_map_json, size_t token_map_len, size_t *out_len);
 
-/**
- * Redact PII in `input` using an explicit `salt`, so the salted-hex tokens are
- * reproducible. Surfaces that share the same `salt` bytes produce byte-identical
- * output — this is how the cross-language conformance vectors stay deterministic.
- *
- * Same return contract and memory ownership as `ogentic_redact`.
- *
- * @param input      Pointer to UTF-8 encoded input bytes.
- * @param input_len  Length of `input` in bytes.
- * @param salt       Pointer to salt bytes (may be NULL/empty; any length).
- * @param salt_len   Length of `salt` in bytes.
- * @param out_len    Set to the byte length of the returned buffer, 0 on error.
- * @return           Heap-allocated buffer, or NULL on error.
- */
-uint8_t *ogentic_redact_with_salt(const uint8_t *input,
-                                   size_t         input_len,
-                                   const uint8_t *salt,
-                                   size_t         salt_len,
-                                   size_t        *out_len);
+/* Custom limits; zero permitted. Errors return NULL, length 0 and optional status. */
+uint8_t *ogentic_unredact_with_limits(const uint8_t *input, size_t input_len,
+    const uint8_t *token_map_json, size_t token_map_len, size_t max_output_bytes,
+    size_t max_replacements, size_t *out_len, uint8_t *out_status);
 
-/**
- * Restore redacted placeholders in `input`.
- *
- * `token_map_json` must be the JSON object from the `"tokens"` field of a
- * previous `ogentic_redact` call, mapping placeholder strings to their
- * original values.
- *
- * Returns a heap-allocated UTF-8 buffer containing the restored text.
- * Sets `*out_len` to its byte length.  Returns NULL on error.
- *
- * The caller must free the returned buffer with `ogentic_redact_free`.
- *
- * @param input              Redacted UTF-8 text.
- * @param input_len          Length of `input` in bytes.
- * @param token_map_json     JSON object (`{"[EMAIL_1]": "alice@…"}`).
- * @param token_map_len      Length of `token_map_json` in bytes.
- * @param out_len            Set to byte length of the restored buffer.
- * @return                   Heap-allocated restored text, or NULL on error.
- */
-uint8_t *ogentic_unredact(const uint8_t *input,
-                            size_t         input_len,
-                            const uint8_t *token_map_json,
-                            size_t         token_map_len,
-                            size_t        *out_len);
+/* Explicit reversible mode. Originals are scoped to an opaque in-process store. */
+typedef struct OgenticRedactor OgenticRedactor;
+OgenticRedactor *ogentic_redactor_open(void);
+OgenticRedactor *ogentic_redactor_open_with_limits(size_t max_output_bytes, size_t max_replacements);
+void ogentic_redactor_close(OgenticRedactor *handle);
+/* JSON: {"text": string, "mapping_id": opaque string}, never an inline map. */
+uint8_t *ogentic_redactor_redact(OgenticRedactor *handle,
+    const uint8_t *input, size_t input_len, size_t *out_len);
+/* Restore within session limits; NULL on error. Successful consume deletes the mapping. */
+uint8_t *ogentic_redactor_unredact(OgenticRedactor *handle,
+    const uint8_t *input, size_t input_len,
+    const uint8_t *mapping_id, size_t mapping_id_len, uint8_t consume, size_t *out_len);
+/* Same operation with explicit error status. Limit rejection never consumes. */
+uint8_t *ogentic_redactor_unredact_with_status(OgenticRedactor *handle,
+    const uint8_t *input, size_t input_len, const uint8_t *mapping_id,
+    size_t mapping_id_len, uint8_t consume, size_t *out_len, uint8_t *out_status);
+uint8_t ogentic_redactor_delete(OgenticRedactor *handle,
+    const uint8_t *mapping_id, size_t mapping_id_len);
 
-/* ── streaming API ────────────────────────────────────────────────────────── */
-
-/**
- * Opaque streaming handle created by `ogentic_redact_stream_open`.
- *
- * The handle internally splits the input into sentence-level chunks and
- * yields each chunk's redacted JSON in turn.  This gives Meeting Mode a
- * low-latency first result while subsequent sentences are still being
- * processed.
- */
+/* Batch sentence delivery: open redacts the entire input before returning.
+ * next returns {"text": string}, preserving all separators and whitespace.
+ * There are no retained plaintext maps. This is not incremental detection.
+ * NULL/length 0 from next means exhausted. */
 typedef struct OgenticRedactStream OgenticRedactStream;
-
-/**
- * Open a streaming redaction session for `input`.
- *
- * Splits the input on sentence-ending punctuation (`.`, `!`, `?`, `\n`),
- * redacts each chunk, and stores the results for delivery via
- * `ogentic_redact_stream_next`.
- *
- * Returns an opaque handle, or NULL on error (invalid UTF-8, OOM).
- * The caller must close the handle with `ogentic_redact_stream_close`
- * regardless of how many chunks were consumed.
- *
- * No network calls are made.
- *
- * @param input      Pointer to UTF-8 encoded input bytes.
- * @param input_len  Length of `input` in bytes.
- * @return           Opaque stream handle, or NULL on error.
- */
-OgenticRedactStream *ogentic_redact_stream_open(const uint8_t *input,
-                                                  size_t         input_len);
-
-/**
- * Yield the next redacted chunk from a streaming session.
- *
- * Returns a heap-allocated JSON buffer in the same format as `ogentic_redact`
- * and sets `*out_len` to its byte length.  Returns NULL when the stream is
- * exhausted (i.e. all chunks have been delivered); `*out_len` is set to 0.
- *
- * The returned buffer must be freed with `ogentic_redact_free` before
- * calling `ogentic_redact_stream_next` again.
- *
- * @param handle   Valid handle from `ogentic_redact_stream_open`.  NULL is safe.
- * @param out_len  Set to byte length of the chunk on success, 0 when exhausted.
- * @return         Heap-allocated chunk buffer, or NULL when exhausted.
- */
-uint8_t *ogentic_redact_stream_next(OgenticRedactStream *handle,
-                                     size_t              *out_len);
-
-/**
- * Close and deallocate a streaming session.
- *
- * Must be called exactly once per handle returned by
- * `ogentic_redact_stream_open`, even if the stream was not fully consumed.
- * After this call the handle pointer is invalid.
- *
- * @param handle  Handle to close.  NULL is safe (no-op).
- */
+OgenticRedactStream *ogentic_redact_stream_open(const uint8_t *input, size_t input_len);
+uint8_t *ogentic_redact_stream_next(OgenticRedactStream *handle, size_t *out_len);
 void ogentic_redact_stream_close(OgenticRedactStream *handle);
-
 #ifdef __cplusplus
-} /* extern "C" */
+}
 #endif
-
-#endif /* OGENTIC_REDACT_H */
+#endif

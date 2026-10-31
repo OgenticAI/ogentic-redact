@@ -78,7 +78,7 @@ class TestCloudOptIn:
             )
             assert len(w) == 1
             assert issubclass(w[0].category, UserWarning)
-            assert "Cloud-assisted recognisers are enabled" in str(w[0].message)
+            assert "Cloud-assisted classification was requested" in str(w[0].message)
 
     def test_cloud_opt_in_warning_once_per_process(self) -> None:
         import ogentic_redact.redactor as redactor_module
@@ -150,3 +150,13 @@ class TestFailurePathCloudRejection:
         assert "Cloud recognisers require explicit opt-in" in str(error)
         assert "cloud=True" in str(error)
         assert "on-device only" in str(error)
+
+
+def test_invalid_direct_spans_fail_before_output() -> None:
+    import pytest
+    for spans in [
+        {}, [None], [Span(0.5, 4, "PERSON")], [Span(True, 4, "PERSON")],
+        [Span(0, 4, "secret@example.com")],
+    ]:
+        with pytest.raises(ValueError):
+            Redactor().redact("Alice", spans)

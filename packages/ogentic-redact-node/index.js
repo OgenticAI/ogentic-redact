@@ -12,9 +12,7 @@ function isMusl() {
 
 const platformPackages = {
   'linux-x64': '@ogenticai/redact-linux-x64-gnu',
-  'linux-arm64': '@ogenticai/redact-linux-arm64-gnu',
   'darwin-arm64': '@ogenticai/redact-darwin-arm64',
-  'darwin-x64': '@ogenticai/redact-darwin-x64',
   'win32-x64': '@ogenticai/redact-win32-x64-msvc',
 }
 

@@ -16,15 +16,22 @@ permissions:
   attestations: write  # artifact attestation storage
 
 jobs:
-  # ── Pre-flight (audit D3: verify crates.io email before any publish) ───────────
+  # ── Pre-flight: parse the tag and check every package agrees on the version ──
+  # The crates.io email check lives in publish-crates, so a missing crates token
+  # can no longer stop PyPI or npm from publishing.
   preflight:
-    name: "Pre-flight: verify crates.io email + parse version"
+    name: "Pre-flight: parse version + check versions agree"
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       version: ${{ steps.parse.outputs.version }}
 
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Parse version from tag
         id: parse
         run: |
@@ -33,25 +40,16 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Releasing v$VERSION"
 
-      # Audit D3 lesson: confirm crates.io account email is verified before
-      # attempting to publish. Publishing with an unverified email fails silently
-      # mid-run and leaves crates in a partially-published state.
-      - name: Verify crates.io account email is confirmed
-        env:
-          CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+      - name: Verify tag and package versions agree
         run: |
-          RESPONSE=$(curl -sf \
-            -H "Authorization: Bearer $CRATES_IO_TOKEN" \
-            -H "Accept: application/json" \
-            https://crates.io/api/v1/me)
-          EMAIL_VERIFIED=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['user']['email_verified'])")
-          if [ "$EMAIL_VERIFIED" != "True" ]; then
-            echo "::error::crates.io account email is NOT verified."
-            echo "Visit https://crates.io/settings/profile and verify your email before releasing."
-            echo "(Audit D3 lesson: ogentic-audit release was blocked by this exact issue.)"
-            exit 1
-          fi
-          echo "crates.io email verified — safe to publish."
+          python3 - <<'PYCODE'
+          import json, os, pathlib, tomllib
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          cargo = tomllib.loads(pathlib.Path("Cargo.toml").read_text())
+          assert cargo["workspace"]["package"]["version"] == version, "Cargo/tag version mismatch"
+          for path in [pathlib.Path("packages/ogentic-redact-node/package.json"), *pathlib.Path("packages/ogentic-redact-node/npm").glob("*/package.json")]:
+              assert json.loads(path.read_text())["version"] == version, f"Version mismatch: {path}"
+          PYCODE
 
   # ── Build Python wheels ────────────────────────────────────────────────────────
   build-wheels:
@@ -155,6 +153,12 @@ jobs:
         working-directory: packages/ogentic-redact-node
         run: napi build --platform --release --target ${{ matrix.target }}
 
+      - name: Smoke test the exact release binary
+        working-directory: packages/ogentic-redact-node
+        env:
+          OGENTIC_REDACT_BINDING: ./${{ matrix.node-file }}
+        run: node tests/smoke.cjs
+
       - name: Upload node artifact
         uses: actions/upload-artifact@v4
         with:
@@ -162,15 +166,98 @@ jobs:
           path: packages/ogentic-redact-node/${{ matrix.node-file }}
           if-no-files-found: error
 
+  # All builds and privacy smoke checks must pass before any registry write.
+  verify-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [build-wheels, build-node]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test Rust workspace
+        run: cargo test --workspace
+      - name: Verify checksum generation and tamper detection
+        run: bash scripts/test-checksums.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install compatible napi-rs CLI
+        run: npm install -g @napi-rs/cli@2
+      - name: Download node artifacts for install validation
+        uses: actions/download-artifact@v4
+        with:
+          pattern: node-*
+          path: packages/ogentic-redact-node/artifacts/
+          merge-multiple: true
+      - name: Assemble platform packages
+        working-directory: packages/ogentic-redact-node
+        run: napi artifacts
+      - name: Smoke test packed npm installation before publishing
+        working-directory: packages/ogentic-redact-node
+        run: |
+          PACK_DIR=$(mktemp -d "$RUNNER_TEMP/redact-pack.XXXXXX")
+          npm pack --ignore-scripts --pack-destination "$PACK_DIR"
+          npm pack ./npm/linux-x64-gnu --ignore-scripts --pack-destination "$PACK_DIR"
+          INSTALL_DIR=$(mktemp -d "$RUNNER_TEMP/redact-install.XXXXXX")
+          npm install --prefix "$INSTALL_DIR" --ignore-scripts --omit=optional --no-audit --no-fund "$PACK_DIR"/*.tgz
+          OGENTIC_REDACT_BINDING="$INSTALL_DIR/node_modules/@ogenticai/redact" node tests/smoke.cjs
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Download Linux wheel for native install validation
+        uses: actions/download-artifact@v4
+        with:
+          name: wheels-x86_64-unknown-linux-gnu
+          path: wheel-smoke/
+      - name: Smoke test installed Python native wheel without optional runtimes
+        run: |
+          python -m venv "$RUNNER_TEMP/redact-wheel"
+          "$RUNNER_TEMP/redact-wheel/bin/pip" install --no-deps wheel-smoke/*.whl
+          "$RUNNER_TEMP/redact-wheel/bin/python" - <<'PYCODE'
+          import importlib.metadata, importlib.util
+          distribution = importlib.metadata.distribution("ogentic-redact")
+          path = next(distribution.locate_file(p) for p in distribution.files if p.name.startswith("_native.") and p.suffix == ".so")
+          spec = importlib.util.spec_from_file_location("_native", path)
+          native = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(native)
+          text = "Email alice@example.com; call 555-867-5309; SSN 123-45-6789."
+          for result in (native.redact(text), native.redact_with_salt(text, b"release-smoke")):
+              assert set(result) == {"text", "redaction_count"}
+              assert result["redaction_count"] == 3
+              assert all(secret not in result["text"] for secret in ("alice@example.com", "555-867-5309", "123-45-6789"))
+          PYCODE
+
   # ── Publish Rust crates to crates.io ──────────────────────────────────────────
   publish-crates:
     name: "Publish crates to crates.io"
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: preflight
+    needs: verify-release
 
     steps:
       - uses: actions/checkout@v4
+
+      # Audit D3 lesson: confirm crates.io account email is verified before
+      # attempting to publish. Publishing with an unverified email fails silently
+      # mid-run and leaves crates in a partially-published state.
+      - name: Verify crates.io account email is confirmed
+        env:
+          CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          RESPONSE=$(curl -sf \
+            -H "Authorization: Bearer $CRATES_IO_TOKEN" \
+            -H "Accept: application/json" \
+            https://crates.io/api/v1/me)
+          EMAIL_VERIFIED=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['user']['email_verified'])")
+          if [ "$EMAIL_VERIFIED" != "True" ]; then
+            echo "::error::crates.io account email is NOT verified."
+            echo "Visit https://crates.io/settings/profile and verify your email before releasing."
+            echo "(Audit D3 lesson: ogentic-audit release was blocked by this exact issue.)"
+            exit 1
+          fi
+          echo "crates.io email verified — safe to publish."
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -205,7 +292,7 @@ jobs:
     name: "Publish to PyPI"
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: build-wheels
+    needs: verify-release
     environment:
       name: pypi
       url: https://pypi.org/project/ogentic-redact/
@@ -229,7 +316,7 @@ jobs:
     name: "Publish to npm"
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: build-node
+    needs: verify-release
 
     steps:
       - uses: actions/checkout@v4
@@ -299,10 +386,9 @@ jobs:
           merge-multiple: true
 
       - name: Generate SHA-256 checksums
-        working-directory: release-artifacts
         run: |
-          find . -type f | sort | xargs sha256sum > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          bash scripts/generate-checksums.sh release-artifacts
+          (cd release-artifacts && sha256sum -c SHA256SUMS.txt)
 
       - name: Sign artifacts with GitHub Attestations
         uses: actions/attest-build-provenance@v1

@@ -1,242 +1,204 @@
-/// OgenticRedact — Swift binding for the `ogentic-redact` Rust library.
-///
-/// Wraps the C FFI surface exposed by `ogentic_redact.h` / `libogentic_redact_ffi`
-/// with idiomatic Swift types.  All on-device; no network calls in the default
-/// path.
-///
-/// # Quick start
-/// ```swift
-/// let result = try OgenticRedact.redact("Email alice@example.com for details.")
-/// print(result.text)          // "Email [Email_3f8a2c1b] for details."
-/// print(result.tokenMap)      // ["[Email_3f8a2c1b]": "alice@example.com"]
-///
-/// let restored = try OgenticRedact.unredact(result.text, using: result.tokenMap)
-/// print(restored)             // "Email alice@example.com for details."
-///
-/// // Streaming (Meeting Mode)
-/// for try await chunk in OgenticRedact.redactStream(longTranscript) {
-///     updateUI(chunk)
-/// }
-/// ```
+/// Safe one-way redaction with explicit instance-scoped reversible mode.
+/// The built-in EMAIL/PHONE/US_SSN scanner is a development convenience.
 import Foundation
 import COgenticRedact
 
-// ── Errors ────────────────────────────────────────────────────────────────────
-
-/// Errors that can be thrown by `OgenticRedact` operations.
 public enum OgenticRedactError: Error, Equatable {
-    /// The library returned a null pointer, indicating invalid UTF-8 input or OOM.
     case libraryError
-    /// The JSON payload returned by the library could not be decoded.
-    case jsonDecodingError(String)
-    /// The provided token map is not valid JSON.
+    case jsonDecodingError
+    case mappingNotFound
     case invalidTokenMap
+    case invalidRestorationLimits
+    case restorationLimitExceeded
 }
 
-// ── Result types ──────────────────────────────────────────────────────────────
-
-/// The result of a redaction operation.
-public struct RedactedText: Sendable, Equatable {
-    /// The input text with PII replaced by placeholder tokens (e.g. `[Email_3f8a2c1b]`).
+/// One-way result. Original values and mapping identifiers are never retained.
+public struct RedactedText: Sendable, Equatable, Decodable {
     public let text: String
-
-    /// Maps each placeholder to the original value it replaced.
-    ///
-    /// Example: `["[Email_3f8a2c1b]": "alice@example.com"]`
-    ///
-    /// Pass this to `OgenticRedact.unredact(_:using:)` to restore the
-    /// original text.
-    public let tokenMap: [String: String]
-
-    /// `true` when no PII was found and `text` equals the original input.
-    public var isClean: Bool { tokenMap.isEmpty }
+    public let redactionCount: Int
+    public var isClean: Bool { redactionCount == 0 }
+    private enum CodingKeys: String, CodingKey {
+        case text
+        case redactionCount = "redaction_count"
+    }
 }
 
-// ── Chunk type for streaming ───────────────────────────────────────────────────
-
-/// A single sentence-level chunk from a streaming redaction session.
-public struct RedactedChunk: Sendable, Equatable {
-    /// The redacted sentence text.
+/// A byte-preserving sentence slice of an already-redacted document.
+public struct RedactedChunk: Sendable, Equatable, Decodable {
     public let text: String
-    /// Tokens discovered in this chunk only.
-    public let tokenMap: [String: String]
 }
 
-// ── Raw payload shape (matches ogentic_redact's JSON output) ──────────────────
-
-private struct RawRedactPayload: Decodable {
-    let text: String
-    let tokens: [String: String]
+public struct ReversibleText: Sendable, Equatable, Decodable {
+    public let text: String
+    public let mappingId: String
+    private enum CodingKeys: String, CodingKey {
+        case text
+        case mappingId = "mapping_id"
+    }
 }
 
-// ── Library version ───────────────────────────────────────────────────────────
+public var ogenticRedactVersion: String { String(cString: ogentic_redact_version()) }
 
-/// The version string reported by the underlying Rust library.
-public var ogenticRedactVersion: String {
-    String(cString: ogentic_redact_version())
-}
-
-// ── Main namespace ────────────────────────────────────────────────────────────
-
-/// Namespace for the on-device redaction API.
 public enum OgenticRedact {
-
-    // ── Version ───────────────────────────────────────────────────────────────
-
-    /// The version of the underlying `ogentic-redact-ffi` library.
     public static var version: String { ogenticRedactVersion }
 
-    // ── Synchronous API ───────────────────────────────────────────────────────
-
-    /// Redact PII in `text` and return the redacted form with its token map.
-    ///
-    /// - Parameter text: Plain UTF-8 text that may contain PII.
-    /// - Returns: A ``RedactedText`` containing the scrubbed text and the
-    ///   token map needed to restore the original.
-    /// - Throws: ``OgenticRedactError`` on library error or JSON decode failure.
     public static func redact(_ text: String) throws -> RedactedText {
         try text.withUTF8Bytes { ptr, len in
-            var outLen: Int = 0
-            guard let raw = ogentic_redact(ptr, len, &outLen) else {
-                throw OgenticRedactError.libraryError
-            }
+            var outLen = 0
+            guard let raw = ogentic_redact(ptr, len, &outLen) else { throw OgenticRedactError.libraryError }
             defer { ogentic_redact_free(raw, outLen) }
-            return try decodePayload(raw, length: outLen)
+            return try decode(raw, length: outLen)
         }
     }
 
-    /// Redact PII in `text` using an explicit `salt`, so the salted-hex tokens
-    /// are reproducible. Surfaces sharing the same salt bytes produce
-    /// byte-identical output — the basis of the cross-language conformance
-    /// vectors.
-    ///
-    /// - Parameters:
-    ///   - text: Plain UTF-8 text that may contain PII.
-    ///   - salt: The salt bytes (any length; may be empty).
-    /// - Returns: A ``RedactedText`` with the scrubbed text and token map.
-    /// - Throws: ``OgenticRedactError`` on library error or JSON decode failure.
+    /// Deterministic one-way output; never contains original values.
     public static func redact(_ text: String, salt: [UInt8]) throws -> RedactedText {
         try text.withUTF8Bytes { ptr, len in
-            var outLen: Int = 0
-            let raw: UnsafeMutablePointer<UInt8>? = salt.withUnsafeBufferPointer { saltBuf in
-                ogentic_redact_with_salt(ptr, len, saltBuf.baseAddress, saltBuf.count, &outLen)
+            var outLen = 0
+            let raw = salt.withUnsafeBufferPointer {
+                ogentic_redact_with_salt(ptr, len, $0.baseAddress, $0.count, &outLen)
             }
             guard let raw else { throw OgenticRedactError.libraryError }
             defer { ogentic_redact_free(raw, outLen) }
-            return try decodePayload(raw, length: outLen)
+            return try decode(raw, length: outLen)
         }
     }
 
-    /// Restore redacted placeholders in `text` using `tokenMap`.
-    ///
-    /// - Parameters:
-    ///   - text: A previously redacted string containing placeholder tokens.
-    ///   - tokenMap: The ``RedactedText/tokenMap`` returned by a prior
-    ///     ``redact(_:)`` call.
-    /// - Returns: The original text with all placeholders substituted back.
-    /// - Throws: ``OgenticRedactError`` on library error or invalid map.
-    public static func unredact(_ text: String, using tokenMap: [String: String]) throws -> String {
-        let mapData: Data
-        do {
-            mapData = try JSONSerialization.data(withJSONObject: tokenMap)
-        } catch {
-            throw OgenticRedactError.invalidTokenMap
-        }
-
-        return try text.withUTF8Bytes { textPtr, textLen in
-            try mapData.withUnsafeBytes { mapBuf in
-                let mapPtr = mapBuf.bindMemory(to: UInt8.self).baseAddress!
-                var outLen: Int = 0
-                guard let raw = ogentic_unredact(textPtr, textLen, mapPtr, mapData.count, &outLen) else {
-                    throw OgenticRedactError.libraryError
-                }
-                defer { ogentic_redact_free(raw, outLen) }
-                guard let result = String(bytes: UnsafeBufferPointer(start: raw, count: outLen),
-                                          encoding: .utf8) else {
-                    throw OgenticRedactError.libraryError
-                }
-                return result
+    /// Legacy explicit-map restoration. Prefer ReversibleRedactor for new code.
+    /// Limits count restored UTF-8 bytes and mapped token occurrences; zero is valid.
+    public static func unredact(_ text: String, using tokenMap: [String: String],
+                                maxOutputBytes: Int = 16 * 1024 * 1024,
+                                maxReplacements: Int = 100_000) throws -> String {
+        guard maxOutputBytes >= 0, maxReplacements >= 0 else { throw OgenticRedactError.invalidRestorationLimits }
+        let data = try JSONSerialization.data(withJSONObject: tokenMap)
+        return try text.withUTF8Bytes { ptr, len in
+            try data.withUnsafeBytes { map in
+                var n = 0
+                var status: UInt8 = 0
+                guard let raw = ogentic_unredact_with_limits(ptr, len, map.bindMemory(to: UInt8.self).baseAddress,
+                                                data.count, maxOutputBytes, maxReplacements, &n, &status)
+                else { throw restorationError(status) }
+                defer { ogentic_redact_free(raw, n) }
+                return try decodeText(raw, length: n)
             }
         }
     }
 
-    // ── Streaming API ─────────────────────────────────────────────────────────
-
-    /// Redact `text` as an `AsyncStream` of sentence-level ``RedactedChunk``
-    /// values, suitable for Meeting Mode's low-latency display.
-    ///
-    /// The stream yields one chunk per detected sentence boundary (`.`, `!`,
-    /// `?`, or `\n`).  The first chunk is delivered as soon as the first
-    /// sentence is processed, without waiting for the rest of the input.
-    ///
-    /// ```swift
-    /// for try await chunk in OgenticRedact.redactStream(transcript) {
-    ///     appendToTranscript(chunk.text)
-    /// }
-    /// ```
-    ///
-    /// - Parameter text: Input text to redact incrementally.
-    /// - Returns: An `AsyncThrowingStream` of ``RedactedChunk`` values.
+    /// Redact the complete document, then deliver exact sentence slices on demand.
+    /// Detection finishes before the first chunk; no producer queue is allocated.
+    /// Cancellation is checked before and after the native batch and between
+    /// deliveries. An in-flight native batch completes before cancellation takes
+    /// effect; cancellation stops subsequent chunk delivery.
     public static func redactStream(_ text: String) -> AsyncThrowingStream<RedactedChunk, Error> {
-        AsyncThrowingStream { continuation in
-            // Open the stream handle on a background task so callers can
-            // `await` the first chunk without blocking the calling actor.
-            Task.detached {
-                do {
-                    try text.withUTF8Bytes { ptr, len in
-                        guard let handle = ogentic_redact_stream_open(ptr, len) else {
-                            throw OgenticRedactError.libraryError
-                        }
-                        defer { ogentic_redact_stream_close(handle) }
+        let state = SentenceDeliveryState(text)
+        return AsyncThrowingStream(unfolding: { try await state.next() })
+    }
+}
 
-                        while true {
-                            var chunkLen: Int = 0
-                            guard let chunkPtr = ogentic_redact_stream_next(handle, &chunkLen) else {
-                                break // stream exhausted
-                            }
-                            let chunk: RedactedChunk
-                            do {
-                                let payload = try decodePayload(chunkPtr, length: chunkLen)
-                                chunk = RedactedChunk(text: payload.text, tokenMap: payload.tokenMap)
-                            } catch {
-                                ogentic_redact_free(chunkPtr, chunkLen)
-                                throw error
-                            }
-                            ogentic_redact_free(chunkPtr, chunkLen)
-                            continuation.yield(chunk)
-                        }
-                        continuation.finish()
-                    }
-                } catch {
-                    continuation.finish(throwing: error)
-                }
+/// Explicit opt-in reversible mode. Originals stay in this instance's Rust store.
+/// Instances are independent; delete or consume mappings after their useful life.
+public final class ReversibleRedactor: @unchecked Sendable {
+    private let handle: OpaquePointer
+
+    /// Failed restoration keeps its mapping, including when consume is requested.
+    public init(maxOutputBytes: Int = 16 * 1024 * 1024, maxReplacements: Int = 100_000) throws {
+        guard maxOutputBytes >= 0, maxReplacements >= 0 else { throw OgenticRedactError.invalidRestorationLimits }
+        guard let handle = ogentic_redactor_open_with_limits(maxOutputBytes, maxReplacements)
+        else { throw OgenticRedactError.libraryError }
+        self.handle = handle
+    }
+
+    deinit { ogentic_redactor_close(handle) }
+
+    public func redact(_ text: String) throws -> ReversibleText {
+        try text.withUTF8Bytes { ptr, len in
+            var n = 0
+            guard let raw = ogentic_redactor_redact(handle, ptr, len, &n) else { throw OgenticRedactError.libraryError }
+            defer { ogentic_redact_free(raw, n) }
+            return try decode(raw, length: n)
+        }
+    }
+
+    public func unredact(_ text: String, mappingId: String, consume: Bool = false) throws -> String {
+        try text.withUTF8Bytes { ptr, len in
+            try mappingId.withUTF8Bytes { id, idLen in
+                var n = 0
+                var status: UInt8 = 0
+                guard let raw = ogentic_redactor_unredact_with_status(handle, ptr, len, id, idLen,
+                                                                    consume ? 1 : 0, &n, &status)
+                else { throw restorationError(status) }
+                defer { ogentic_redact_free(raw, n) }
+                return try decodeText(raw, length: n)
             }
         }
     }
-}
 
-// ── Private helpers ───────────────────────────────────────────────────────────
-
-/// Decode the JSON payload returned by `ogentic_redact` / stream next.
-private func decodePayload(_ ptr: UnsafeMutablePointer<UInt8>, length: Int) throws -> RedactedText {
-    let data = Data(bytes: ptr, count: length)
-    do {
-        let raw = try JSONDecoder().decode(RawRedactPayload.self, from: data)
-        return RedactedText(text: raw.text, tokenMap: raw.tokens)
-    } catch {
-        throw OgenticRedactError.jsonDecodingError(error.localizedDescription)
+    @discardableResult
+    public func delete(mappingId: String) -> Bool {
+        mappingId.withUTF8Bytes { ogentic_redactor_delete(handle, $0, $1) != 0 }
     }
 }
 
-extension String {
-    /// Call `body` with a pointer to the string's UTF-8 bytes and their length.
-    ///
-    /// Uses `withUTF8` to avoid a copy when the string's storage is already
-    /// contiguous UTF-8.
-    func withUTF8Bytes<R>(_ body: (UnsafePointer<UInt8>, Int) throws -> R) rethrows -> R {
-        var copy = self
-        return try copy.withUTF8 { buf in
-            try body(buf.baseAddress!, buf.count)
+/// Pull-based sentence delivery serializes handle use and releases it at EOF,
+/// cancellation, error, or when the abandoned sequence is deallocated.
+private actor SentenceDeliveryState {
+    private var input: String?
+    private var handle: OpaquePointer?
+
+    init(_ text: String) { input = text }
+    deinit { if let handle { ogentic_redact_stream_close(handle) } }
+
+    private func close() {
+        if let handle { ogentic_redact_stream_close(handle) }
+        handle = nil
+        input = nil
+    }
+
+    func next() throws -> RedactedChunk? {
+        do {
+            try Task.checkCancellation()
+            if let text = input {
+                handle = text.withUTF8Bytes { ogentic_redact_stream_open($0, $1) }
+                input = nil
+                guard handle != nil else { throw OgenticRedactError.libraryError }
+            }
+            try Task.checkCancellation()
+            guard let handle else { return nil }
+            var n = 0
+            guard let raw = ogentic_redact_stream_next(handle, &n) else { close(); return nil }
+            defer { ogentic_redact_free(raw, n) }
+            return try decode(raw, length: n)
+        } catch {
+            close()
+            throw error
         }
+    }
+}
+
+private func restorationError(_ status: UInt8) -> OgenticRedactError {
+    switch Int32(status) {
+    case OGENTIC_RESTORE_MAPPING_NOT_FOUND: return .mappingNotFound
+    case OGENTIC_RESTORE_LIMIT_EXCEEDED: return .restorationLimitExceeded
+    case OGENTIC_RESTORE_INVALID_INPUT: return .invalidTokenMap
+    default: return .libraryError
+    }
+}
+
+private func decode<T: Decodable>(_ ptr: UnsafeMutablePointer<UInt8>, length: Int) throws -> T {
+    do { return try JSONDecoder().decode(T.self, from: Data(bytes: ptr, count: length)) }
+    catch { throw OgenticRedactError.jsonDecodingError }
+}
+
+private func decodeText(_ ptr: UnsafeMutablePointer<UInt8>, length: Int) throws -> String {
+    guard let result = String(bytes: UnsafeBufferPointer(start: ptr, count: length), encoding: .utf8)
+    else { throw OgenticRedactError.libraryError }
+    return result
+}
+
+private extension String {
+    func withUTF8Bytes<R>(_ body: (UnsafePointer<UInt8>, Int) throws -> R) rethrows -> R {
+        // The trailing byte ensures a valid pointer even for empty strings.
+        let bytes = Array(utf8) + [0]
+        return try bytes.withUnsafeBufferPointer { try body($0.baseAddress!, $0.count - 1) }
     }
 }

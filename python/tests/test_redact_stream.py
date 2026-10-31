@@ -1,7 +1,8 @@
 """Acceptance tests for redact_stream (OGE-1221 / REDACT-R6).
 
 AC1: redact_stream yields (redacted_chunk, list[DetectionEvent]) for each chunk.
-AC2: Per-chunk latency <= 100 ms (see bench_stream.py for the formal benchmark).
+AC2: Finalized-record processing latency is measured by bench_stream.py;
+     time waiting for record finalization is outside that benchmark.
 AC3: Entities spanning a chunk boundary are fully redacted.
 AC4: Streaming path is on-device (no network calls in the default path).
 AC5: Each DetectionEvent carries entity_type, chunk_index, start, end, score.
@@ -186,3 +187,151 @@ class TestAC5DetectionEventFields:
         redacted, _ = results[0]
         tokens = re.findall(r"<<[A-Z_]+_\d+>>", redacted)
         assert tokens, f"no <<TYPE_N>> tokens found in redacted output: {redacted!r}"
+
+
+@pytest.mark.parametrize(('text', 'entity_type'), [
+    ('Contact alice@example.com now.', 'EMAIL_ADDRESS'),
+    ('Call +1-800-555-0199.', 'PHONE_NUMBER'),
+    ('SSN: 219-09-9999.', 'US_SSN'),
+    ('😊 Contact alice@example.com\n', 'EMAIL_ADDRESS'),
+])
+def test_every_two_chunk_partition_matches_complete_record(text: str, entity_type: str) -> None:
+    profile = Profile(entity_types=[entity_type])
+    expected = ''.join(part for part, _ in redact_stream([text], profile))
+    assert expected != text
+    partitions = [[text[:cut], text[cut:]] for cut in range(len(text) + 1)]
+    partitions.extend([list(text), [part for char in text for part in (char, '')]])
+    for chunks in partitions:
+        actual = list(redact_stream(chunks, profile))
+        assert len(actual) == len(chunks)
+        assert ''.join(part for part, _ in actual) == expected
+        for chunk, (_, events) in zip(chunks, actual, strict=True):
+            assert all(0 <= event.start < event.end <= len(chunk) for event in events)
+
+
+def test_no_prefix_is_released_before_input_finalizes() -> None:
+    def broken_input():
+        yield 'Contact alice@'
+        raise RuntimeError('input transport failed')
+
+    stream = redact_stream(broken_input(), Profile(entity_types=['EMAIL_ADDRESS']))
+    with pytest.raises(RuntimeError, match='input transport failed'):
+        next(stream)
+
+
+@pytest.mark.parametrize('chunks,limits', [
+    (['Contact alice@', 'example.com'], {'max_buffer_chars': 15}),
+    (['', '', ''], {'max_chunks': 2}),
+])
+def test_buffer_limit_fails_before_output(chunks: list[str], limits: dict[str, int]) -> None:
+    from ogentic_redact.errors import RedactError
+
+    stream = redact_stream(chunks, Profile(), **limits)
+    with pytest.raises(RedactError, match='buffer limit'):
+        next(stream)
+
+
+def test_overlap_union_protects_all_sensitive_characters() -> None:
+    from presidio_analyzer import RecognizerResult
+    from unittest.mock import Mock
+
+    analyzer = Mock()
+    analyzer.get_supported_entities.return_value = Profile().entity_types
+    analyzer.analyze.return_value = [
+        RecognizerResult('A', 0, 10, .5),
+        RecognizerResult('B', 1, 3, .9),
+        RecognizerResult('C', 4, 6, .8),
+        RecognizerResult('D', 10, 12, .7),
+    ]
+    with patch('ogentic_redact.stream._get_analyzer', return_value=analyzer):
+        result = list(redact_stream(['abcdefghijkl rest'], Profile()))
+    assert result[0][0] == '<<B_1>><<D_1>> rest'
+    assert [(e.start, e.end) for e in result[0][1]] == [(0, 10), (10, 12)]
+
+
+def test_missing_model_fails_without_downloader() -> None:
+    import importlib
+    from ogentic_redact.errors import RedactError
+
+    module = importlib.import_module('ogentic_redact.stream')
+    with (
+        patch.object(module, '_analyzer', None),
+        patch('spacy.load', side_effect=OSError('missing local model')),
+        patch('spacy.cli.download') as downloader,
+    ):
+        with pytest.raises(RedactError, match='runtime does not download'):
+            next(redact_stream(['Contact alice@example.com'], Profile()))
+    downloader.assert_not_called()
+
+
+def test_empty_chunks_preserve_shape_without_loading_model() -> None:
+    with patch('ogentic_redact.stream._get_analyzer') as analyzer:
+        assert list(redact_stream(['', ''], Profile())) == [('', []), ('', [])]
+    analyzer.assert_not_called()
+
+
+@pytest.mark.parametrize('score', ['0.5', None, True, float('nan'), float('inf')])
+def test_malformed_local_confidence_raises_sanitized_error_before_output(score: object) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from ogentic_redact.errors import ClassifierError
+
+    analyzer = Mock()
+    analyzer.get_supported_entities.return_value = Profile().entity_types
+    analyzer.analyze.return_value = [SimpleNamespace(start=0, end=5, entity_type='PERSON', score=score)]
+    with patch('ogentic_redact.stream._get_analyzer', return_value=analyzer):
+        with pytest.raises(ClassifierError, match='invalid'):
+            next(redact_stream(['Alice'], Profile()))
+
+
+def test_empty_entity_selection_preserves_chunks_without_loading_model() -> None:
+    chunks = ['Email alice@', '', 'example.com']
+    with patch('ogentic_redact.stream._get_analyzer') as analyzer:
+        assert list(redact_stream(chunks, Profile(entity_types=[]))) == [(chunk, []) for chunk in chunks]
+    analyzer.assert_not_called()
+
+
+def test_local_legal_profile_rejects_missing_domain_recognizers_before_output() -> None:
+    from ogentic_redact.errors import ClassifierError
+    stream = redact_stream(
+        ['Case 1:23-cv-00456; Bates ABC0000123; email alice@example.com.'],
+        Profile.from_shield_profile('shield-legal'),
+    )
+    with pytest.raises(ClassifierError, match='BATES_NUMBER, CASE_NUMBER'):
+        next(stream)
+
+
+def test_mixed_supported_and_unsupported_policy_never_runs_partial_detection() -> None:
+    from unittest.mock import Mock
+    from ogentic_redact.errors import ClassifierError
+    analyzer = Mock()
+    analyzer.get_supported_entities.return_value = ['EMAIL_ADDRESS']
+    with patch('ogentic_redact.stream._get_analyzer', return_value=analyzer):
+        stream = redact_stream(['Case 1:23-cv-00456; alice@example.com'], Profile(entity_types=['EMAIL_ADDRESS', 'CASE_NUMBER']))
+        with pytest.raises(ClassifierError, match='CASE_NUMBER'):
+            next(stream)
+    analyzer.analyze.assert_not_called()
+
+
+def test_local_finance_profile_runs_with_supported_entity_policy() -> None:
+    result = list(redact_stream(['Email alice@example.com'], Profile.from_shield_profile('shield-finance')))
+    assert result[0][0] == 'Email <<EMAIL_ADDRESS_1>>'
+
+
+def test_mutated_invalid_profile_is_rejected_before_input_is_read() -> None:
+    profile = Profile()
+    profile.entity_types = None
+    def chunks():
+        raise AssertionError('input should not be read with an invalid profile')
+        yield ''
+    with pytest.raises(ValueError, match='entity_types'):
+        next(redact_stream(chunks(), profile))
+
+
+def test_input_iterable_cannot_mutate_active_profile_selection() -> None:
+    profile = Profile(entity_types=['EMAIL_ADDRESS'])
+    def chunks():
+        profile.entity_types.clear()
+        yield 'Email alice@example.com'
+    result = list(redact_stream(chunks(), profile))
+    assert result[0][0] == 'Email <<EMAIL_ADDRESS_1>>'

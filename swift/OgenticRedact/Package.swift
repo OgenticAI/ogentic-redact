@@ -10,9 +10,14 @@
 // (and optionally `x86_64-apple-darwin`) and places the resulting `.a` under
 // `swift/OgenticRedact/lib/`.
 
+import Foundation
 import PackageDescription
 
-let libDir = "lib"   // relative to Package.swift — i.e. swift/OgenticRedact/lib/
+// Linker paths are evaluated in the consuming package, so anchor this to the manifest.
+let libDir = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .appendingPathComponent("lib")
+    .path
 
 let package = Package(
     name: "OgenticRedact",

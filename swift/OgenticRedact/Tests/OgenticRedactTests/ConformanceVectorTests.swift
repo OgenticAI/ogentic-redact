@@ -2,7 +2,7 @@
 ///
 /// Loads `Resources/vectors.json` (bundled via Package.swift `resources`)
 /// and verifies that `OgenticRedact.redact(_:)` produces byte-identical
-/// `text` and `tokens` output to the expected values.  Any divergence is an
+/// safe `text` output to the expected values.  Any divergence is an
 /// XCTest failure (→ CI red).
 ///
 /// Run (after `scripts/build-swift-ffi.sh`):
@@ -67,18 +67,13 @@ final class ConformanceVectorTests: XCTestCase {
                 v.expected_text,
                 "[\(v.id)] text mismatch — input: \(v.input.debugDescription)"
             )
+            // Restoration is an explicit opt-in with an instance-scoped store.
+            let redactor = try ReversibleRedactor()
+            let reversible = try redactor.redact(v.input)
             XCTAssertEqual(
-                result.tokenMap,
-                v.expected_tokens,
-                "[\(v.id)] tokens mismatch — input: \(v.input.debugDescription)"
-            )
-
-            // Round-trip (ADR-0003 §9).
-            let restored = try OgenticRedact.unredact(result.text, using: result.tokenMap)
-            XCTAssertEqual(
-                restored,
+                try redactor.unredact(reversible.text, mappingId: reversible.mappingId, consume: true),
                 v.input,
-                "[\(v.id)] round-trip mismatch — input: \(v.input.debugDescription)"
+                "[\(v.id)] explicit reversible round-trip mismatch"
             )
         }
     }

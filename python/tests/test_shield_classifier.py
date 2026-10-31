@@ -53,9 +53,9 @@ class TestRedactSpan:
         )
         assert span.confidence == pytest.approx(0.97)
 
-    def test_confidence_defaults_to_one_when_absent(self) -> None:
-        span = RedactSpan.from_shield_entity({"category": "PERSON", "start": 0, "end": 4})
-        assert span.confidence == 1.0
+    def test_missing_confidence_is_rejected(self) -> None:
+        with pytest.raises(ClassifierError):
+            RedactSpan.from_shield_entity({"category": "PERSON", "start": 0, "end": 4})
 
     def test_malformed_entity_raises_classifier_error(self) -> None:
         with pytest.raises(ClassifierError):
@@ -182,7 +182,7 @@ class TestShieldAdapter:
         # AC3: profile passed straight through to Shield; URL built from base_url.
         (url, payload) = client.calls[0]
         assert url == "http://127.0.0.1:8600/analyze"
-        assert payload == {"text": TEXT, "profile": SHIELD_FINANCE}
+        assert payload == {"text": TEXT, "profiles": [SHIELD_FINANCE]}
 
     def test_end_to_end_through_redactor(self) -> None:
         client = _FakeClient(
@@ -206,3 +206,83 @@ class TestShieldAdapter:
         # Sanitised: the raw cause (URL / token) is not in the surfaced message.
         assert "secret token" not in str(exc.value)
         assert "shield.local" not in str(exc.value)
+
+
+@pytest.mark.parametrize("payload", [{}, {"entities": {}}, {"entities": ""}, {"entities": None}, []])
+def test_invalid_response_envelopes_fail_closed(payload: Any) -> None:
+    adapter = ShieldAdapter("http://shield.local", client=_FakeClient(payload))
+    with pytest.raises(ClassifierError):
+        Redactor(classifier=adapter).redact(TEXT)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("start", 0.9), ("end", 4.9), ("start", True), ("end", "5"),
+    ("category", None), ("category", "secret@example.com"),
+    ("confidence", "1.0"), ("confidence", True), ("confidence", float("nan")),
+])
+def test_span_wire_values_are_not_coerced(field: str, value: Any) -> None:
+    entity = {"category": "PERSON", "start": 0, "end": 5, "confidence": 1.0}
+    entity[field] = value
+    with pytest.raises(ClassifierError):
+        RedactSpan.from_shield_entity(entity)
+
+
+@pytest.mark.parametrize("entity", [
+    {"category": "PERSON", "start": 3, "end": 1, "confidence": 1.0},
+    {"category": "PERSON", "start": 0, "end": 50, "confidence": 1.0},
+    {"category": "PERSON", "start": 0, "end": 2, "confidence": 1.0, "text": "Alice"},
+])
+def test_invalid_source_ranges_fail_closed(entity: dict[str, Any]) -> None:
+    adapter = ShieldAdapter("http://shield.local", client=_FakeClient({"entities": [entity]}))
+    with pytest.raises(ClassifierError):
+        Redactor(classifier=adapter).redact("Alice")
+
+
+def test_source_validation_also_applies_to_custom_classifier_before_threshold() -> None:
+    invalid = RedactSpan(category="PERSON", start=0, end=100, confidence=0.01)
+    with pytest.raises(ClassifierError):
+        Redactor(classifier=FixtureShieldAdapter([invalid])).redact("Alice")
+
+
+def test_real_category_group_survives_boundary() -> None:
+    entity = {
+        "category": "PRIVILEGE_MARKER", "category_group": "PRIVILEGE",
+        "start": 0, "end": 5, "confidence": 1.0, "text": "Alice",
+    }
+    span = RedactSpan.from_shield_entity(entity)
+    assert span.to_span().group == 0
+    lower = RedactSpan(category="PERSON", category_group="PII", start=0, end=5, confidence=1.0)
+    result = Redactor(classifier=FixtureShieldAdapter([lower, span])).redact("Alice")
+    assert result.text == "[PRIVILEGE_MARKER]"
+
+
+@pytest.mark.parametrize("threshold", [float("nan"), float("inf"), -0.1, 1.1, True, "0.5"])
+def test_invalid_min_confidence_rejected(threshold: Any) -> None:
+    with pytest.raises(ValueError, match="min_confidence"):
+        Redactor(min_confidence=threshold)
+
+
+def test_empty_explicit_spans_bypass_classifier() -> None:
+    class UnexpectedClassifier:
+        def classify(self, text: str, profile: str) -> list[RedactSpan]:
+            raise AssertionError("explicit spans must take precedence")
+    assert Redactor(classifier=UnexpectedClassifier()).redact(TEXT, spans=[]).text == TEXT
+
+
+def test_exception_logs_do_not_include_classifier_secrets(caplog: pytest.LogCaptureFixture) -> None:
+    import traceback
+    class BrokenClient:
+        def post(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("credential-and-sensitive-payload")
+    with pytest.raises(ClassifierError) as failure:
+        ShieldAdapter("http://shield.local", client=BrokenClient()).classify(TEXT, SHIELD_LEGAL)
+    assert "credential-and-sensitive-payload" not in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert "credential-and-sensitive-payload" not in "".join(traceback.format_exception(failure.value))
+
+
+def test_default_redactor_profile_uses_shield_configured_defaults() -> None:
+    client = _FakeClient({"entities": []})
+    redactor = Redactor(classifier=ShieldAdapter("http://shield.local", client=client))
+    assert redactor.redact("No entities").text == "No entities"
+    assert client.calls == [("http://shield.local/analyze", {"text": "No entities"})]

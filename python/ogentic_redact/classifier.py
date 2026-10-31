@@ -19,9 +19,9 @@ opt-in network path.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, Self, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ogentic_redact.categories import CATEGORY_GROUP_PRECEDENCE
 from ogentic_redact.errors import ClassifierError
@@ -65,42 +65,54 @@ class RedactSpan(BaseModel):
     :meth:`to_span`.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, strict=True)
 
-    category: str = Field(min_length=1)
+    category: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z][A-Za-z0-9_]*$")
+    category_group: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_]*$")
     start: int = Field(ge=0)
     end: int = Field(gt=0)
     confidence: float = Field(ge=0.0, le=1.0)
-    text: str = ""
+    text: str | None = None
+
+    @model_validator(mode="after")
+    def _ordered_range(self) -> Self:
+        if self.end <= self.start:
+            raise ValueError("classifier span must have start < end")
+        return self
+
+    def validate_source(self, source: str) -> None:
+        """Reject out-of-range offsets or a supplied match from another source."""
+        if self.end > len(source) or (
+            self.text is not None and self.text != source[self.start : self.end]
+        ):
+            raise ClassifierError("classifier span does not match source text")
 
     @classmethod
     def from_shield_entity(cls, entity: dict[str, Any]) -> RedactSpan:
         """Build a :class:`RedactSpan` from one Shield ``DetectedEntity`` object.
 
         Accepts Shield's JSON entity shape (``category``, ``start``, ``end``,
-        ``confidence``, ``text``); unknown extra keys (``category_group``,
-        ``layer``, …) are ignored so Shield can add fields without breaking us.
+        ``confidence``, ``text``, ``category_group``). Unknown extra keys are
+        ignored. Offsets must be integers and confidence must be a finite
+        number in [0, 1]; malformed values are never coerced into valid spans.
         """
         try:
-            return cls(
-                category=str(entity["category"]),
-                start=int(entity["start"]),
-                end=int(entity["end"]),
-                confidence=float(entity.get("confidence", 1.0)),
-                text=str(entity.get("text", "")),
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ClassifierError("malformed classifier span") from exc
+            return cls.model_validate(entity)
+        except (KeyError, TypeError, ValueError):
+            raise ClassifierError("malformed classifier span") from None
 
     def to_span(self) -> Span:
         """Convert to the internal :class:`Span` the redactor replaces.
 
-        The ``group`` precedence tier is resolved from the category via
+        The ``group`` precedence tier is resolved from ``category_group`` via
         :data:`~ogentic_redact.categories.CATEGORY_GROUP_PRECEDENCE`
         (PRIVILEGE > PHI > MNPI > PII); an unknown category falls to the lowest
         tier so it never outranks a classified one.
         """
-        group = CATEGORY_GROUP_PRECEDENCE.get(self.category.upper(), _DEFAULT_GROUP)
+        # Category-only group labels remain supported for legacy callers.
+        group = CATEGORY_GROUP_PRECEDENCE.get(
+            (self.category_group or self.category).upper(), _DEFAULT_GROUP
+        )
         return Span(start=self.start, end=self.end, entity_type=self.category, group=group)
 
 
@@ -123,9 +135,10 @@ class ShieldAdapter:
     """Real HTTP adapter over ogentic-shield's ``analyze`` surface (AC4).
 
     Isolates the Shield API behind :class:`ClassifierProtocol`: it POSTs
-    ``{"text", "profile"}`` to ``<base_url>/analyze`` and maps the returned
+    ``{"text", "profiles": [profile]}`` to ``<base_url>/analyze`` and maps the returned
     ``entities`` array into :class:`RedactSpan` objects. The core never sees
-    ``httpx`` or Shield's wire shape.
+    ``httpx`` or Shield's wire shape. Redactor's ``"default"`` profile sentinel
+    omits ``profiles`` so Shield uses its configured default profiles.
 
     Network use is explicit opt-in (CLAUDE.md §4): only callers that construct a
     ``ShieldAdapter`` and pass it to a :class:`~ogentic_redact.redactor.Redactor`
@@ -153,14 +166,20 @@ class ShieldAdapter:
         """Classify *text* by calling Shield; map ``entities`` → spans.
 
         Raises:
-            ClassifierError: on any transport or response-shape failure. The raw
-                cause is logged with context but not surfaced to the caller.
+            ClassifierError: on any transport, response-shape, or source-span
+                failure. Logs contain exception types, never response contents.
         """
-        payload = {"text": text, "profile": profile}
+        payload: dict[str, Any] = {"text": text}
+        if profile != "default":
+            payload["profiles"] = [profile]
         try:
             data = self._post(payload)
-            entities = data.get("entities", [])
-            return [RedactSpan.from_shield_entity(e) for e in entities]
+            if not isinstance(data, dict) or not isinstance(data.get("entities"), list):
+                raise ClassifierError("malformed classifier response")
+            spans = [RedactSpan.from_shield_entity(e) for e in data["entities"]]
+            for span in spans:
+                span.validate_source(text)
+            return spans
         except ClassifierError:
             raise
         except Exception as exc:
@@ -170,9 +189,9 @@ class ShieldAdapter:
                 service="ogentic_redact",
                 op="classify",
                 profile=profile,
-                error=str(exc),
+                error_type=type(exc).__name__,
             )
-            raise ClassifierError("classification request failed") from exc
+            raise ClassifierError("classification request failed") from None
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         """POST *payload* to the Shield analyze endpoint and return parsed JSON."""

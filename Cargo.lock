@@ -590,6 +590,8 @@ dependencies = [
  "ogentic-redact-core",
  "serde",
  "serde_json",
+ "tempfile",
+ "windows-sys",
 ]
 
 [[package]]

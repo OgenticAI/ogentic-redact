@@ -1,577 +1,649 @@
-//! `ogentic-redact-core` — real-time, on-device sensitive-content redaction.
+//! On-device sensitive-content substitution and reversible mapping storage.
 //!
-//! This crate is the heart of the `ogentic-redact` library. It exposes the
-//! primary [`redact`] and [`unredact`] entry points, along with the [`MappingStore`]
-//! that stores reversible token mappings entirely on-device.
-//!
-//! # Quick start
+//! Production callers supply validated UTF-8 byte spans to [`redact_spans`].
+//! Scanner helpers detect EMAIL/PHONE/SSN as a development convenience only.
+//! One-way APIs return no reversal mapping; explicit reversible APIs keep the
+//! mapping in a separate [`MappingStore`].
 //!
 //! ```rust
-//! use ogentic_redact_core::{MappingStore, RedactMode, redact, unredact};
-//!
-//! let mapping_store = MappingStore::new();
-//! let text = "Contact alice@example.com for details.";
-//! let (redacted, mapping_id) = redact(text, "default", RedactMode::Reversible, Some(&mapping_store))
-//!     .expect("redact failed");
-//! let id = mapping_id.expect("reversible mode must return a mapping_id");
-//! let restored = unredact(&redacted, &id, &mapping_store).expect("unredact failed");
-//! assert_eq!(restored, text);
+//! use ogentic_redact_core::{MappingStore, RedactMode, redact, unredact_and_delete};
+//! let store = MappingStore::new();
+//! let original = "Contact alice@example.com.";
+//! let (text, id) = redact(original, "default", RedactMode::Reversible, Some(&store))?;
+//! assert_eq!(unredact_and_delete(&text, &id.unwrap(), &store)?, original);
+//! # Ok::<(), ogentic_redact_core::RedactError>(())
 //! ```
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex,
-    },
+    collections::{HashMap, HashSet},
+    fmt,
+    sync::{Arc, Mutex},
 };
 
 use thiserror::Error;
 
 pub mod token;
 
-// ---------------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------------
-
-/// Errors returned by [`redact`] and [`unredact`].
+/// Errors from redaction, span validation, or mapping lookup.
 #[derive(Debug, Clone, Error)]
 pub enum RedactError {
-    /// The requested profile is not in the allow-list of known profiles.
-    ///
-    /// Unknown profiles are rejected before any processing occurs, mirroring
-    /// the hostile-profile injection defence in `ogentic-shield`.
+    /// The requested development-scanner profile is unknown.
     #[error("unknown redaction profile: {profile:?}")]
     UnknownProfile {
-        /// The name of the unrecognised profile.
+        /// Unrecognised profile name.
         profile: String,
     },
-
-    /// Reversible mode was requested but no mapping_store reference was supplied.
+    /// Reversible operation requires a separate store.
     #[error("reversible mode requires a mapping_store reference")]
     MappingStoreRequired,
-
-    /// The supplied `mapping_id` does not exist in the mapping_store.
+    /// No mapping exists for the supplied identifier.
     #[error("unknown mapping id: {mapping_id:?}")]
     UnknownMappingId {
-        /// The id that could not be resolved.
+        /// Identifier that could not be resolved.
         mapping_id: String,
     },
+    /// A span is empty, reversed, out of bounds, or splits a UTF-8 character.
+    #[error("invalid UTF-8 byte span at index {index}")]
+    InvalidSpan {
+        /// Index in the caller-supplied span list.
+        index: usize,
+    },
+    /// A span has an empty entity type.
+    #[error("empty entity type at span index {index}")]
+    InvalidEntityType {
+        /// Index in the caller-supplied span list.
+        index: usize,
+    },
+    /// Caller spans overlap; resolve policy before invoking substitution.
+    #[error("overlapping spans must be resolved before redaction")]
+    OverlappingSpans,
+    /// Restoration would exceed the configured UTF-8 byte or replacement budget.
+    #[error("restoration limit exceeded")]
+    RestorationLimitExceeded,
+    /// Memory for the bounded restored result could not be reserved.
+    #[error("unable to allocate restored output")]
+    RestorationAllocationFailed,
 }
 
-// ---------------------------------------------------------------------------
-// RedactMode
-// ---------------------------------------------------------------------------
+/// Default maximum restored UTF-8 output size (16 MiB).
+pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+/// Default maximum number of mapped token replacements in one restoration.
+pub const DEFAULT_MAX_REPLACEMENTS: usize = 100_000;
 
-/// Controls whether redaction produces a reversible mapping or a one-way
-/// substitution.
+/// Resource budgets for restoration of potentially untrusted model output.
+/// Zero is permitted: a zero byte budget accepts only empty output, and a zero
+/// replacement budget permits only text with no mapped tokens.
+#[derive(Debug, Clone, Copy)]
+pub struct RestorationLimits {
+    /// Maximum complete restored output size in UTF-8 bytes.
+    pub max_output_bytes: usize,
+    /// Maximum count of mapped token occurrences, including repetitions.
+    pub max_replacements: usize,
+}
+
+impl Default for RestorationLimits {
+    fn default() -> Self {
+        Self {
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+            max_replacements: DEFAULT_MAX_REPLACEMENTS,
+        }
+    }
+}
+
+/// Whether originals are discarded or kept in a separate store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedactMode {
-    /// Store a token→original mapping in the mapping_store and return a `mapping_id`.
-    ///
-    /// Requires `mapping_store: Some(&mapping_store)` in [`redact`]; returns
-    /// [`RedactError::MappingStoreRequired`] otherwise.
+    /// Retain originals in the explicitly supplied store.
     Reversible,
-    /// Replace entities with lossy tokens. No mapping is written and no
-    /// `mapping_id` is returned.
+    /// Return redacted text without retaining a reversal mapping.
     OneWay,
 }
 
-// ---------------------------------------------------------------------------
-// Span
-// ---------------------------------------------------------------------------
-
-/// A detected entity span within the input text.
+/// A sensitive span in the original text, using UTF-8 **byte** offsets.
 ///
-/// Offsets are byte offsets into the original `&str`.  Because entity
-/// detection is currently limited to ASCII patterns (emails), byte offsets
-/// always coincide with character boundaries.
+/// Both offsets must be character boundaries. Bindings whose callers use
+/// character or UTF-16 offsets must convert before calling the Rust API.
 #[derive(Debug, Clone)]
 pub struct Span {
-    /// Byte offset of the first byte of the entity (inclusive).
+    /// First byte, inclusive.
     pub start: usize,
-    /// Byte offset one past the last byte of the entity (exclusive).
+    /// Final byte, exclusive.
     pub end: usize,
-    /// The entity-type label, e.g. `"EMAIL"`.
+    /// Entity category, mapped to a grammar-safe token label.
     pub entity_type: String,
 }
 
-// ---------------------------------------------------------------------------
-// MappingStore
-// ---------------------------------------------------------------------------
-
-/// In-process, on-device store for reversible token mappings.
+/// In-process reversible mappings with explicit deletion and safe diagnostics.
 ///
-/// Each call to [`redact`] with [`RedactMode::Reversible`] produces a new
-/// opaque `mapping_id` and stores a `token → original` table under that id.
-/// [`unredact`] looks up the table by `mapping_id` to restore the original
-/// text.
-///
-/// The store survives only for the lifetime of the process (demo-design §5
-/// option a — zero external dependencies, on-device by default). It is
-/// `Send + Sync` and may be shared across threads.
-#[derive(Debug, Default)]
+/// Identifiers contain 128 random bits. The store does not provide tenant
+/// authorization or automatic expiry; callers must scope stores and invoke
+/// [`MappingStore::delete`] or [`unredact_and_delete`] when records are no longer
+/// needed. Dropping a store releases every remaining record.
+#[derive(Default)]
 pub struct MappingStore {
-    mappings: Mutex<HashMap<String, MappingRecord>>,
-    counter: AtomicU64,
+    mappings: Mutex<HashMap<String, Arc<MappingRecord>>>,
 }
 
-/// One reversible redaction call's worth of mapping_store state (ADR-0003 §3).
-///
-/// Holds the per-call `call_salt` (so tokens are reproducible/auditable) plus,
-/// for each emitted token, the exact original and the `label`/`canonical`
-/// grouping form it was derived from.
-#[derive(Debug, Clone)]
 struct MappingRecord {
-    #[allow(dead_code)] // retained for auditing / future mapping_store-export (OGE-1243)
-    call_salt: [u8; token::SALT_LEN],
-    entries: HashMap<String, MappingEntry>,
+    // Retained for future store persistence; never exposed by Debug.
+    _call_salt: Vec<u8>,
+    entries: HashMap<String, String>,
 }
 
-/// A single token→original mapping within a [`MappingRecord`].
-#[derive(Debug, Clone)]
-struct MappingEntry {
-    original: String,
-    #[allow(dead_code)] // retained for auditing / future mapping_store-export (OGE-1243)
-    label: String,
-    #[allow(dead_code)]
-    canonical: String,
+impl fmt::Debug for MappingStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MappingStore")
+            .field("records", &self.len())
+            .finish()
+    }
 }
 
 impl MappingStore {
-    /// Create a new, empty mapping_store.
+    /// Create an empty store.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Store a redaction record and return its fresh `mapping_id`.
-    fn put(&self, record: MappingRecord) -> String {
-        let id = self.next_id();
-        self.mappings
-            .lock()
-            .expect("mapping_store mutex poisoned")
-            .insert(id.clone(), record);
-        id
+    /// Delete one record, returning whether it existed.
+    ///
+    /// Concurrent restorations that already obtained the record may complete.
+    pub fn delete(&self, mapping_id: &str) -> bool {
+        self.take(mapping_id).is_some()
     }
 
-    /// Retrieve a clone of the record for `mapping_id`, or `None` if absent.
-    fn get(&self, mapping_id: &str) -> Option<MappingRecord> {
+    /// Number of retained records; contains no sensitive information.
+    pub fn len(&self) -> usize {
         self.mappings
             .lock()
-            .expect("mapping_store mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+    }
+
+    /// Whether the store contains no records.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn put(&self, record: MappingRecord) -> String {
+        let mut mappings = self.mappings.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            let random: [u8; 16] = rand::random();
+            let id = format!("map_{:032x}", u128::from_be_bytes(random));
+            if let std::collections::hash_map::Entry::Vacant(entry) = mappings.entry(id.clone()) {
+                entry.insert(Arc::new(record));
+                return id;
+            }
+        }
+    }
+
+    fn get(&self, mapping_id: &str) -> Option<Arc<MappingRecord>> {
+        self.mappings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .get(mapping_id)
             .cloned()
     }
 
-    fn next_id(&self) -> String {
-        let n = self.counter.fetch_add(1, Ordering::Relaxed);
-        format!("map_{n:016x}")
+    fn take(&self, mapping_id: &str) -> Option<Arc<MappingRecord>> {
+        self.mappings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(mapping_id)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Known profiles
-// ---------------------------------------------------------------------------
-
-/// Profiles accepted by [`redact`]. Unknown profiles are rejected before any
-/// processing, preventing hostile-profile injection.
 const KNOWN_PROFILES: &[&str] = &["default", "pii", "phi"];
 
-// ---------------------------------------------------------------------------
-// Entity detection (stdlib-only placeholder)
-// ---------------------------------------------------------------------------
-
-/// Detect entities in `text` and return a deduplicated, sorted list of
-/// [`Span`]s.
-///
-/// This is a minimal placeholder until `REDACT-INT-SHIELD` integration lands.
-/// Currently detects: **EMAIL** (byte-scan for `@` with valid local-part and
-/// domain).  Overlapping spans are removed, keeping the first match.
-fn detect_entities(text: &str) -> Vec<Span> {
-    let mut spans = Vec::new();
-    detect_emails(text, &mut spans);
-    spans.sort_by_key(|s| s.start);
-    dedupe_spans(&mut spans);
-    spans
-}
-
-/// Byte-scan for email addresses.
-///
-/// Heuristic: find `@`, extend leftward for a non-empty local-part (ASCII
-/// alphanumeric + `.+-_`), extend rightward for a domain that contains at
-/// least one `.`.  Placeholder for `REDACT-INT-SHIELD`.
-fn detect_emails(text: &str, out: &mut Vec<Span>) {
-    let bytes = text.as_bytes();
-    for (at_pos, _) in bytes.iter().enumerate().filter(|(_, &b)| b == b'@') {
-        // Extend leftward for local-part.
-        let start = {
-            let mut i = at_pos;
-            while i > 0 && is_email_local_char(bytes[i - 1]) {
-                i -= 1;
-            }
-            i
-        };
-        if start == at_pos {
-            continue; // Empty local-part — not an email.
-        }
-
-        // Extend rightward for domain.
-        let end = {
-            let mut i = at_pos + 1;
-            while i < bytes.len() && is_email_domain_char(bytes[i]) {
-                i += 1;
-            }
-            i
-        };
-        let domain = &bytes[at_pos + 1..end];
-        if domain.is_empty() || !domain.contains(&b'.') {
-            continue; // Domain must have at least one dot.
-        }
-
-        out.push(Span {
-            start,
-            end,
-            entity_type: "EMAIL".to_owned(),
-        });
-    }
-}
-
-fn is_email_local_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-' | b'_')
-}
-
-fn is_email_domain_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-')
-}
-
-/// Remove overlapping spans in a sorted list, keeping the first match.
-fn dedupe_spans(spans: &mut Vec<Span>) {
-    let mut i = 0;
-    while i + 1 < spans.len() {
-        if spans[i].end > spans[i + 1].start {
-            spans.remove(i + 1);
-        } else {
-            i += 1;
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Token assignment (ADR-0003 grammar via the `token` module)
-// ---------------------------------------------------------------------------
-
-/// Assign a `[Label_<salted-hex>]` token to every span under one `call_salt`.
-///
-/// Guarantees within-call stability (same `(label, canonical)` → same token)
-/// and resolves the rare within-call discriminator collision by extending that
-/// token to a longer hex (ADR-0003 §4). Returns the per-span tokens in span
-/// order plus the token→entry table for the mapping_store.
-fn assign_tokens<'a>(
-    text: &'a str,
-    spans: &'a [Span],
-    call_salt: &[u8; token::SALT_LEN],
-) -> (Vec<(&'a Span, String)>, HashMap<String, MappingEntry>) {
-    let mut per_span: Vec<(&Span, String)> = Vec::with_capacity(spans.len());
-    let mut entries: HashMap<String, MappingEntry> = HashMap::new();
-    let mut assigner = TokenAssigner::default();
-
-    for span in spans {
-        let original = &text[span.start..span.end];
-        let label = token::label_for(&span.entity_type);
-        let canonical = token::canonicalize(original);
-        let tok = assigner.assign(&label, &canonical, call_salt);
-        entries.entry(tok.clone()).or_insert_with(|| MappingEntry {
-            original: original.to_owned(),
-            label,
-            canonical,
-        });
-        per_span.push((span, tok));
-    }
-
-    (per_span, entries)
-}
-
-/// Assigns `[Label_<salted-hex>]` tokens within a single call, guaranteeing
-/// within-call stability (same `(label, canonical)` → same token) and
-/// resolving discriminator collisions by extending to a longer hex
-/// (ADR-0003 §4). Shared by the reversible ([`assign_tokens`]) and one-way
-/// ([`redact_one_way_inner`]) paths.
+/// Assign distinct tokens to distinct exact originals, including case/spacing.
+/// Source token literals are reserved so restoration cannot reinterpret them.
 #[derive(Default)]
 struct TokenAssigner {
-    /// (label, canonical) → token, for stability.
     seen: HashMap<(String, String), String>,
-    /// token → canonical, for collision detection.
-    token_canon: HashMap<String, String>,
+    occupied: HashSet<String>,
 }
 
 impl TokenAssigner {
-    fn assign(&mut self, label: &str, canonical: &str, call_salt: &[u8]) -> String {
-        let key = (label.to_owned(), canonical.to_owned());
+    fn for_text(text: &str) -> Self {
+        Self {
+            seen: HashMap::new(),
+            occupied: token::parse_tokens(text)
+                .iter()
+                .map(token::ParsedToken::as_token)
+                .collect(),
+        }
+    }
+
+    fn assign(&mut self, label: &str, original: &str, call_salt: &[u8]) -> String {
+        let full = token::full_discriminator(call_salt, label, original);
+        self.assign_digest(label, original, &full)
+    }
+
+    fn assign_digest(&mut self, label: &str, original: &str, full: &str) -> String {
+        let key = (label.to_owned(), original.to_owned());
         if let Some(existing) = self.seen.get(&key) {
             return existing.clone();
         }
-        let short = token::discriminator(call_salt, label, canonical);
-        let candidate = token::emit(label, &short);
-        let tok = match self.token_canon.get(&candidate) {
-            None => candidate,
-            Some(c) if c == canonical => candidate,
-            // Genuine collision: two different values, same 8-hex → extend to 12.
-            Some(_) => {
-                let full = token::full_discriminator(call_salt, label, canonical);
-                token::emit(label, &full[..token::DISCRIMINATOR_LEN_EXTENDED])
-            },
-        };
-        self.seen.insert(key, tok.clone());
-        self.token_canon.insert(tok.clone(), canonical.to_owned());
-        tok
+        let mut length = token::DISCRIMINATOR_LEN;
+        let mut suffix = 0usize;
+        loop {
+            let discriminator = if length <= full.len() {
+                full[..length].to_owned()
+            } else {
+                // Even a full-digest collision or reserved full-digest literal
+                // is resolved deterministically; the grammar permits extension.
+                format!("{full}{suffix:x}")
+            };
+            let candidate = token::emit(label, &discriminator);
+            if self.occupied.insert(candidate.clone()) {
+                self.seen.insert(key, candidate.clone());
+                return candidate;
+            }
+            if length < full.len() {
+                length = (length + 4).min(full.len());
+            } else {
+                length = full.len() + 1;
+                suffix += 1;
+            }
+        }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/// Redact sensitive entities in `text` using the named `profile`.
+/// Redact with the built-in EMAIL/PHONE/SSN development scanner.
 ///
-/// # Parameters
-///
-/// * `text`    — The input text to redact.
-/// * `profile` — Must be one of `"default"`, `"pii"`, or `"phi"`.
-/// * `mode`    — [`RedactMode::Reversible`] (mapping_store-backed) or
-///   [`RedactMode::OneWay`] (lossy, no mapping stored).
-/// * `mapping_store`   — Required when `mode` is [`RedactMode::Reversible`]; ignored
-///   (and may be `None`) for [`RedactMode::OneWay`].
-///
-/// # Returns
-///
-/// `(redacted_text, mapping_id)` where `mapping_id` is `Some(id)` only for
-/// reversible mode, and `None` for one-way mode.
+/// `profile` accepts `default`, `pii`, or `phi` as compatibility names; each
+/// uses the same limited scanner. Production callers should use [`redact_spans`].
+/// Reversible mode requires a store and returns its opaque mapping identifier.
 ///
 /// # Errors
-///
-/// * [`RedactError::UnknownProfile`] — `profile` is not on the allow-list.
-/// * [`RedactError::MappingStoreRequired`]  — reversible mode requested without a
-///   mapping_store.
+/// Returns [`RedactError::UnknownProfile`] for an unknown profile or
+/// [`RedactError::MappingStoreRequired`] when reversible mode lacks a store.
 pub fn redact(
     text: &str,
     profile: &str,
     mode: RedactMode,
     mapping_store: Option<&MappingStore>,
 ) -> Result<(String, Option<String>), RedactError> {
-    // Gate 1: profile allow-list — reject before any processing.
+    let salt: [u8; token::SALT_LEN] = rand::random();
+    redact_with_salt(text, profile, mode, mapping_store, &salt)
+}
+
+/// [`redact`] with an explicit salt, for deterministic conformance tests.
+///
+/// Production callers should use [`redact`] so independent calls are unlinkable.
+///
+/// # Errors
+/// Has the same profile and store requirements as [`redact`].
+pub fn redact_with_salt(
+    text: &str,
+    profile: &str,
+    mode: RedactMode,
+    mapping_store: Option<&MappingStore>,
+    call_salt: &[u8],
+) -> Result<(String, Option<String>), RedactError> {
     if !KNOWN_PROFILES.contains(&profile) {
         return Err(RedactError::UnknownProfile {
             profile: profile.to_owned(),
         });
     }
+    redact_spans_with_salt(text, &detect_entities(text), mode, mapping_store, call_salt)
+}
 
-    // Gate 2: mapping_store required for reversible mode.
+/// Substitute caller-provided sensitive spans after validating every offset.
+///
+/// Spans may be unsorted; they must be nonempty, disjoint UTF-8 byte ranges with
+/// nonempty entity types. Overlap is rejected instead of silently dropping
+/// sensitive coverage. Callers must apply their category/group policy first;
+/// this entry point does not yet implement category precedence.
+///
+/// # Errors
+/// Returns [`RedactError::InvalidSpan`], [`RedactError::InvalidEntityType`], or
+/// [`RedactError::OverlappingSpans`] before creating any mapping. Reversible
+/// operation without a store returns [`RedactError::MappingStoreRequired`].
+pub fn redact_spans(
+    text: &str,
+    spans: &[Span],
+    mode: RedactMode,
+    mapping_store: Option<&MappingStore>,
+) -> Result<(String, Option<String>), RedactError> {
+    let salt: [u8; token::SALT_LEN] = rand::random();
+    redact_spans_with_salt(text, spans, mode, mapping_store, &salt)
+}
+
+/// Deterministic-salt variant of [`redact_spans`] for conformance testing.
+///
+/// # Errors
+/// Has the same validation and store requirements as [`redact_spans`].
+pub fn redact_spans_with_salt(
+    text: &str,
+    spans: &[Span],
+    mode: RedactMode,
+    mapping_store: Option<&MappingStore>,
+    call_salt: &[u8],
+) -> Result<(String, Option<String>), RedactError> {
     if mode == RedactMode::Reversible && mapping_store.is_none() {
         return Err(RedactError::MappingStoreRequired);
     }
-
-    // Fresh per-call salt: the discriminator derives from it, so the same value
-    // yields a different token in a different call (ADR-0003 §3).
-    let call_salt: [u8; token::SALT_LEN] = rand::random();
-
-    let spans = detect_entities(text);
-    let (per_span, entries) = assign_tokens(text, &spans, &call_salt);
-
-    // Splice the redacted string.
-    let mut redacted = String::with_capacity(text.len());
-    let mut cursor = 0usize;
-    for (span, tok) in &per_span {
-        redacted.push_str(&text[cursor..span.start]);
-        redacted.push_str(tok);
-        cursor = span.end;
+    let mut sorted: Vec<&Span> = Vec::with_capacity(spans.len());
+    for (index, span) in spans.iter().enumerate() {
+        if span.start >= span.end
+            || span.end > text.len()
+            || !text.is_char_boundary(span.start)
+            || !text.is_char_boundary(span.end)
+        {
+            return Err(RedactError::InvalidSpan { index });
+        }
+        if span.entity_type.trim().is_empty() {
+            return Err(RedactError::InvalidEntityType { index });
+        }
+        sorted.push(span);
     }
-    redacted.push_str(&text[cursor..]);
-
-    // Reversible path: persist the record (salt + entries) to the mapping_store.
-    // One-way path emits the same salted grammar but keeps no mapping.
-    if mode == RedactMode::Reversible {
-        // Safety: MappingStoreRequired guard above ensures mapping_store is Some here.
-        let id = mapping_store
-            .expect("mapping_store required; already checked above")
-            .put(MappingRecord { call_salt, entries });
-        return Ok((redacted, Some(id)));
+    sorted.sort_by_key(|span| span.start);
+    if sorted.windows(2).any(|pair| pair[0].end > pair[1].start) {
+        return Err(RedactError::OverlappingSpans);
     }
-
-    Ok((redacted, None))
+    let result = substitute_spans(text, &sorted, call_salt, mode == RedactMode::Reversible);
+    let id = if let Some(store) = mapping_store.filter(|_| mode == RedactMode::Reversible) {
+        Some(store.put(MappingRecord {
+            _call_salt: call_salt.to_vec(),
+            entries: result.tokens,
+        }))
+    } else {
+        None
+    };
+    Ok((result.text, id))
 }
 
-/// Restore the original text from a redacted string using a mapping_store mapping.
-///
-/// Tokens found in `text` that are **not** present in the mapping identified
-/// by `mapping_id` are left untouched — this is documented behaviour, not an
-/// error.  Only the mapping for the exact `mapping_id` is consulted; there is
-/// no cross-mapping resolution.
+/// Restore present tokens using the selected mapping and default resource limits.
+/// Unknown tokens are preserved and originals are never rescanned.
 ///
 /// # Errors
-///
-/// * [`RedactError::UnknownMappingId`] — `mapping_id` is not in the mapping_store.
+/// Returns a missing-mapping, resource-limit, or allocation error. The mapping
+/// remains available after success or failure.
 pub fn unredact(
     text: &str,
     mapping_id: &str,
     mapping_store: &MappingStore,
+) -> Result<String, RedactError> {
+    unredact_with_limits(
+        text,
+        mapping_id,
+        mapping_store,
+        RestorationLimits::default(),
+    )
+}
+
+/// [`unredact`] with explicit UTF-8 output and replacement budgets.
+///
+/// # Errors
+/// Returns a missing-mapping, resource-limit, or allocation error.
+pub fn unredact_with_limits(
+    text: &str,
+    mapping_id: &str,
+    mapping_store: &MappingStore,
+    limits: RestorationLimits,
 ) -> Result<String, RedactError> {
     let record = mapping_store
         .get(mapping_id)
         .ok_or_else(|| RedactError::UnknownMappingId {
             mapping_id: mapping_id.to_owned(),
         })?;
-
-    let positions = token::parse_tokens(text);
-    if positions.is_empty() {
-        return Ok(text.to_owned());
-    }
-
-    let mut restored = String::with_capacity(text.len());
-    let mut cursor = 0usize;
-
-    for tok in &positions {
-        restored.push_str(&text[cursor..tok.start]);
-
-        if let Some(entry) = record.entries.get(&tok.as_token()) {
-            restored.push_str(&entry.original);
-        } else {
-            // Parsed a token shape not in this mapping — leave it verbatim
-            // (documented behaviour; no cross-mapping resolution).
-            restored.push_str(&text[tok.start..tok.end]);
-        }
-        cursor = tok.end;
-    }
-
-    restored.push_str(&text[cursor..]);
-    Ok(restored)
+    unredact_one_way_with_limits(text, &record.entries, limits)
 }
 
-// ---------------------------------------------------------------------------
-// redact_one_way — cross-language conformance API (F3)
-// ---------------------------------------------------------------------------
-
-/// The result of a [`redact_one_way`] call.
+/// Restore within default limits and atomically consume the mapping on success.
+/// Failed validation/allocation leaves it available. Concurrent consuming calls
+/// have one winner; already-started non-consuming lookups may still finish.
 ///
-/// `text` is the redacted string; `tokens` maps each numbered placeholder back
-/// to the original value.  Serialises to the same JSON shape as the C FFI
-/// (`{"text": "…", "tokens": {…}}`), so all four binding surfaces produce
-/// byte-identical output when driven by the same input.
+/// # Errors
+/// Returns a missing-mapping, resource-limit, or allocation error.
+pub fn unredact_and_delete(
+    text: &str,
+    mapping_id: &str,
+    mapping_store: &MappingStore,
+) -> Result<String, RedactError> {
+    unredact_and_delete_with_limits(
+        text,
+        mapping_id,
+        mapping_store,
+        RestorationLimits::default(),
+    )
+}
+
+/// [`unredact_and_delete`] with explicit resource budgets.
+/// Output is fully validated and constructed before removing the immutable
+/// record. A rejected restoration never consumes its mapping.
+///
+/// # Errors
+/// Returns a missing-mapping error if another consumer wins, or a limit or
+/// allocation error without removing the record.
+pub fn unredact_and_delete_with_limits(
+    text: &str,
+    mapping_id: &str,
+    mapping_store: &MappingStore,
+    limits: RestorationLimits,
+) -> Result<String, RedactError> {
+    let record = mapping_store
+        .get(mapping_id)
+        .ok_or_else(|| RedactError::UnknownMappingId {
+            mapping_id: mapping_id.to_owned(),
+        })?;
+    let restored = unredact_one_way_with_limits(text, &record.entries, limits)?;
+    let mut mappings = mapping_store
+        .mappings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if mappings
+        .get(mapping_id)
+        .is_some_and(|current| Arc::ptr_eq(current, &record))
+    {
+        mappings.remove(mapping_id);
+        Ok(restored)
+    } else {
+        Err(RedactError::UnknownMappingId {
+            mapping_id: mapping_id.to_owned(),
+        })
+    }
+}
+
+/// Safe one-way result: contains redacted text and nonsensitive counts only.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RedactOneWayResult {
-    /// Redacted text, e.g. `"Contact [Email_3f8a2c1b] at [Phone_9be10422]."`.
+    /// Redacted text; no token-to-original mapping accompanies it.
     pub text: String,
-    /// Token→original map, e.g. `{"[Email_3f8a2c1b]": "alice@example.com"}`.
-    pub tokens: HashMap<String, String>,
+    /// Number of sensitive spans replaced, including repeated values.
+    pub redaction_count: usize,
 }
 
 impl RedactOneWayResult {
-    /// `true` when no PII was detected.
+    /// Whether the development scanner found no sensitive spans.
     pub fn is_clean(&self) -> bool {
-        self.tokens.is_empty()
+        self.redaction_count == 0
     }
 }
 
-/// Redact PII in `text` with deterministic numbered placeholder tokens.
+/// Explicitly sensitive low-level result for mapping-store adapters.
 ///
-/// This is the function used by the F3 cross-language conformance test.  All
-/// four surfaces (Rust native, Python via PyO3, Node via napi-rs, Swift via C
-/// FFI) delegate to this implementation and must produce byte-identical output
-/// for the same input.
-///
-/// Token format: `[Label_<salted-hex>]` (ADR-0003), e.g. `[Email_3f8a2c1b]`.
-/// A fresh per-call salt makes the same value redact differently across calls;
-/// use [`redact_one_way_with_salt`] to supply a fixed salt (conformance / tests).
-///
-/// Detected patterns: email address, US phone number, US Social Security Number.
-/// (Detection is a documented dev convenience — production spans come from
-/// Shield, per ADR-0002.)
+/// **This value contains plaintext originals. Never forward or log it as a
+/// redacted response.** Ordinary callers should use [`redact_one_way`] or a
+/// separate [`MappingStore`]. It deliberately does not implement `Serialize`
+/// or reveal originals through `Debug`.
+#[derive(Clone)]
+pub struct RedactMappingResult {
+    /// Redacted text.
+    pub text: String,
+    /// Sensitive token-to-original table, for separate protected storage only.
+    pub tokens: HashMap<String, String>,
+}
+
+impl fmt::Debug for RedactMappingResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RedactMappingResult")
+            .field("entries", &self.tokens.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Redact EMAIL/PHONE/SSN using the local development scanner, without retaining
+/// or returning any reversal mapping. Production callers supply spans instead.
 pub fn redact_one_way(text: &str) -> RedactOneWayResult {
-    let call_salt: [u8; token::SALT_LEN] = rand::random();
-    redact_one_way_with_salt(text, &call_salt)
+    let salt: [u8; token::SALT_LEN] = rand::random();
+    redact_one_way_with_salt(text, &salt)
 }
 
-/// [`redact_one_way`] with an explicit `call_salt`, so output is reproducible.
-///
-/// The salt need not be [`token::SALT_LEN`] bytes — HMAC accepts any key — but
-/// callers that want cross-surface byte-identity must agree on the exact bytes
-/// (this is how the F3 conformance vectors stay deterministic).
+/// Deterministic-salt [`redact_one_way`] for tests; returns no originals.
 pub fn redact_one_way_with_salt(text: &str, call_salt: &[u8]) -> RedactOneWayResult {
-    let (out_text, tokens) = redact_one_way_inner(text, call_salt);
+    let spans = detect_entities(text);
+    let sorted: Vec<_> = spans.iter().collect();
+    let result = substitute_spans(text, &sorted, call_salt, false);
     RedactOneWayResult {
-        text: out_text,
-        tokens,
+        text: result.text,
+        redaction_count: spans.len(),
     }
 }
 
-/// Restore redacted placeholders using the token map from a prior
-/// [`redact_one_way`] call.
+/// Explicit low-level scanner operation returning plaintext originals.
 ///
-/// Scans for `[Label_<hex>]` tokens and replaces each by exact map lookup
-/// (ADR-0003 §7) — never a blind substring replace, so one token's bytes being
-/// a substring of another's cannot cause a double substitution.
-pub fn unredact_one_way(redacted: &str, tokens: &HashMap<String, String>) -> String {
-    let positions = token::parse_tokens(redacted);
-    if positions.is_empty() {
-        return redacted.to_owned();
-    }
-    let mut out = String::with_capacity(redacted.len());
-    let mut cursor = 0usize;
-    for tok in &positions {
-        out.push_str(&redacted[cursor..tok.start]);
-        match tokens.get(&tok.as_token()) {
-            Some(original) => out.push_str(original),
-            None => out.push_str(&redacted[tok.start..tok.end]),
+/// **Sensitive:** keep the returned mapping separate from downstream text.
+/// This is intended for CLI/private store adapters, not one-way responses.
+pub fn redact_to_mapping(text: &str) -> RedactMappingResult {
+    let salt: [u8; token::SALT_LEN] = rand::random();
+    redact_to_mapping_with_salt(text, &salt)
+}
+
+/// Deterministic-salt [`redact_to_mapping`]; the returned mapping is sensitive.
+pub fn redact_to_mapping_with_salt(text: &str, call_salt: &[u8]) -> RedactMappingResult {
+    let spans = detect_entities(text);
+    let sorted: Vec<_> = spans.iter().collect();
+    substitute_spans(text, &sorted, call_salt, true)
+}
+
+fn substitute_spans(
+    text: &str,
+    spans: &[&Span],
+    call_salt: &[u8],
+    retain_mapping: bool,
+) -> RedactMappingResult {
+    let mut assigner = TokenAssigner::for_text(text);
+    let mut out = String::with_capacity(text.len());
+    let mut tokens = HashMap::new();
+    let mut cursor = 0;
+    for span in spans {
+        let original = &text[span.start..span.end];
+        let token = assigner.assign(&token::label_for(&span.entity_type), original, call_salt);
+        out.push_str(&text[cursor..span.start]);
+        out.push_str(&token);
+        if retain_mapping {
+            tokens.entry(token).or_insert_with(|| original.to_owned());
         }
-        cursor = tok.end;
+        cursor = span.end;
+    }
+    out.push_str(&text[cursor..]);
+    RedactMappingResult { text: out, tokens }
+}
+
+/// Restore an explicitly supplied sensitive mapping within default limits.
+/// A true [`redact_one_way`] result has no map and cannot be reversed.
+///
+/// # Errors
+/// Returns a resource-limit or allocation error without partially returning text.
+pub fn unredact_one_way(
+    redacted: &str,
+    tokens: &HashMap<String, String>,
+) -> Result<String, RedactError> {
+    unredact_one_way_with_limits(redacted, tokens, RestorationLimits::default())
+}
+
+/// Non-cascading restoration with allocation-free preflight and explicit limits.
+/// Unknown tokens remain literal and restored originals are never rescanned.
+///
+/// # Errors
+/// Returns [`RedactError::RestorationLimitExceeded`] before output allocation if
+/// UTF-8 bytes or mapped occurrences exceed the budget, or
+/// [`RedactError::RestorationAllocationFailed`] if reservation fails.
+pub fn unredact_one_way_with_limits(
+    redacted: &str,
+    tokens: &HashMap<String, String>,
+    limits: RestorationLimits,
+) -> Result<String, RedactError> {
+    let mut size = 0usize;
+    let mut count = 0usize;
+    let mut cursor = 0usize;
+    for token in token::token_ranges(redacted) {
+        size = size
+            .checked_add(token.start - cursor)
+            .ok_or(RedactError::RestorationLimitExceeded)?;
+        let key = &redacted[token.start..token.end];
+        let replacement_len = if let Some(original) = tokens.get(key) {
+            count = count
+                .checked_add(1)
+                .ok_or(RedactError::RestorationLimitExceeded)?;
+            original.len()
+        } else {
+            key.len()
+        };
+        size = size
+            .checked_add(replacement_len)
+            .ok_or(RedactError::RestorationLimitExceeded)?;
+        if size > limits.max_output_bytes || count > limits.max_replacements {
+            return Err(RedactError::RestorationLimitExceeded);
+        }
+        cursor = token.end;
+    }
+    size = size
+        .checked_add(redacted.len() - cursor)
+        .ok_or(RedactError::RestorationLimitExceeded)?;
+    if size > limits.max_output_bytes {
+        return Err(RedactError::RestorationLimitExceeded);
+    }
+    let mut out = String::new();
+    out.try_reserve_exact(size)
+        .map_err(|_| RedactError::RestorationAllocationFailed)?;
+    cursor = 0;
+    for token in token::token_ranges(redacted) {
+        out.push_str(&redacted[cursor..token.start]);
+        let key = &redacted[token.start..token.end];
+        out.push_str(tokens.get(key).map_or(key, String::as_str));
+        cursor = token.end;
     }
     out.push_str(&redacted[cursor..]);
-    out
+    Ok(out)
 }
 
-// ── Internal: byte-level pattern matching ─────────────────────────────────────
-
-fn redact_one_way_inner(text: &str, call_salt: &[u8]) -> (String, HashMap<String, String>) {
-    let mut out = String::with_capacity(text.len());
-    let mut token_map: HashMap<String, String> = HashMap::new();
-    let mut assigner = TokenAssigner::default();
-
+// Shared development scanner. It is deliberately not a production detector.
+fn detect_entities(text: &str) -> Vec<Span> {
     let bytes = text.as_bytes();
-    let len = bytes.len();
+    let mut spans = Vec::new();
     let mut i = 0;
-
-    while i < len {
-        // Detection order is significant: email, then SSN, then phone.
+    while i < bytes.len() {
         let hit = match_email(bytes, i)
-            .map(|(m, e)| ("EMAIL", m, e))
-            .or_else(|| match_ssn(bytes, i).map(|(m, e)| ("SSN", m, e)))
-            .or_else(|| match_phone(bytes, i).map(|(m, e)| ("PHONE", m, e)));
-
-        if let Some((entity_type, matched, end)) = hit {
-            let label = token::label_for(entity_type);
-            let canonical = token::canonicalize(&matched);
-            let tok = assigner.assign(&label, &canonical, call_salt);
-            token_map.entry(tok.clone()).or_insert(matched);
-            out.push_str(&tok);
+            .map(|(_, end)| ("EMAIL_ADDRESS", end))
+            .or_else(|| match_ssn(bytes, i).map(|(_, end)| ("US_SSN", end)))
+            .or_else(|| match_phone(bytes, i).map(|(_, end)| ("PHONE_NUMBER", end)));
+        if let Some((entity_type, end)) = hit {
+            spans.push(Span {
+                start: i,
+                end,
+                entity_type: entity_type.to_owned(),
+            });
             i = end;
-            continue;
-        }
-
-        // Pass through, preserving multi-byte UTF-8 sequences.
-        if bytes[i].is_ascii() {
-            out.push(char::from(bytes[i]));
-            i += 1;
         } else {
-            let tail = &text[i..];
-            let c = tail.chars().next().unwrap_or('\u{FFFD}');
-            out.push(c);
-            i += c.len_utf8();
+            i += text[i..]
+                .chars()
+                .next()
+                .expect("nonempty remaining text")
+                .len_utf8();
         }
     }
+    spans
+}
 
-    (out, token_map)
+fn is_email_local_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-' | b'_')
 }
 
 fn match_email(b: &[u8], pos: usize) -> Option<(String, usize)> {
@@ -682,10 +754,6 @@ fn match_phone(b: &[u8], pos: usize) -> Option<(String, usize)> {
     None
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,10 +829,7 @@ mod tests {
 
     // AC4: no cross-mapping bleed — mapping scope is strictly isolated per mapping_id.
     //
-    // Both mappings produce <<EMAIL_0>> as the token, but each mapping_id points to
-    // a different sub-map in the mapping_store.  Unredacting mapping A's text with mapping B's
-    // id yields mapping B's value (not mapping A's original), demonstrating that the
-    // lookup is scoped to the specified mapping_id only.
+    // Independently salted mappings must never resolve each other's tokens.
     #[test]
     fn no_cross_mapping_bleed() {
         let mapping_store = MappingStore::new();
@@ -802,7 +867,7 @@ mod tests {
             cross, text_a,
             "wrong mapping_id must not restore correct original — proves isolation"
         );
-        // Mapping B maps <<EMAIL_0>> to bob@example.org, so alice must not appear.
+        // A foreign mapping must not introduce Alice's original.
         assert!(
             !cross.contains("alice@example.com"),
             "alice's PII must not appear when using mapping B"
@@ -933,7 +998,7 @@ mod tests {
         );
     }
 
-    // MappingStore id format: "map_{n:016x}".
+    // MappingStore identifiers carry 128 unpredictable random bits.
     #[test]
     fn vault_id_format() {
         let mapping_store = MappingStore::new();
@@ -951,8 +1016,14 @@ mod tests {
             Some(&mapping_store),
         )
         .unwrap();
-        assert_eq!(mid0.unwrap(), "map_0000000000000000");
-        assert_eq!(mid1.unwrap(), "map_0000000000000001");
+        let mid0 = mid0.unwrap();
+        let mid1 = mid1.unwrap();
+        assert_ne!(mid0, mid1);
+        for id in [&mid0, &mid1] {
+            assert!(id.starts_with("map_"));
+            assert_eq!(id.len(), 36);
+            assert!(id[4..].bytes().all(|b| b.is_ascii_hexdigit()));
+        }
     }
 
     // The fixed salt used by the F3 conformance vectors (matches vectors.json).
@@ -963,7 +1034,7 @@ mod tests {
 
     #[test]
     fn one_way_email_token() {
-        let r = redact_one_way_with_salt("Contact alice@example.com for details.", &TEST_SALT);
+        let r = redact_to_mapping_with_salt("Contact alice@example.com for details.", &TEST_SALT);
         let toks = token::parse_tokens(&r.text);
         assert_eq!(toks.len(), 1);
         assert_eq!(toks[0].label, "Email");
@@ -973,7 +1044,7 @@ mod tests {
 
     #[test]
     fn one_way_phone_dash() {
-        let r = redact_one_way_with_salt("Call 555-867-5309 for support.", &TEST_SALT);
+        let r = redact_to_mapping_with_salt("Call 555-867-5309 for support.", &TEST_SALT);
         let toks = token::parse_tokens(&r.text);
         assert_eq!(toks.len(), 1);
         assert_eq!(toks[0].label, "Phone");
@@ -982,7 +1053,7 @@ mod tests {
 
     #[test]
     fn one_way_ssn() {
-        let r = redact_one_way_with_salt("Patient SSN is 123-45-6789.", &TEST_SALT);
+        let r = redact_to_mapping_with_salt("Patient SSN is 123-45-6789.", &TEST_SALT);
         let toks = token::parse_tokens(&r.text);
         assert_eq!(toks.len(), 1);
         assert_eq!(toks[0].label, "Ssn");
@@ -1000,16 +1071,16 @@ mod tests {
     #[test]
     fn one_way_round_trip() {
         let input = "Forward to bob.smith@mail.corp.io now.";
-        let r = redact_one_way(input);
-        let restored = unredact_one_way(&r.text, &r.tokens);
+        let r = redact_to_mapping(input);
+        let restored = unredact_one_way(&r.text, &r.tokens).unwrap();
         assert_eq!(restored, input);
     }
 
     #[test]
     fn one_way_fixed_salt_is_reproducible() {
         // Same salt → identical bytes (the property the conformance vectors need).
-        let a = redact_one_way_with_salt("mail me at a@b.com", &TEST_SALT);
-        let b = redact_one_way_with_salt("mail me at a@b.com", &TEST_SALT);
+        let a = redact_to_mapping_with_salt("mail me at a@b.com", &TEST_SALT);
+        let b = redact_to_mapping_with_salt("mail me at a@b.com", &TEST_SALT);
         assert_eq!(a.text, b.text);
         assert_eq!(a.tokens, b.tokens);
     }
@@ -1018,22 +1089,42 @@ mod tests {
     fn one_way_random_salt_is_unlinkable() {
         // Default (random) salt → different tokens across calls, each restoring.
         let input = "mail me at a@b.com";
-        let a = redact_one_way(input);
-        let b = redact_one_way(input);
+        let a = redact_to_mapping(input);
+        let b = redact_to_mapping(input);
         assert_ne!(
             a.text, b.text,
             "random salt must vary the token across calls"
         );
-        assert_eq!(unredact_one_way(&a.text, &a.tokens), input);
-        assert_eq!(unredact_one_way(&b.text, &b.tokens), input);
+        assert_eq!(unredact_one_way(&a.text, &a.tokens).unwrap(), input);
+        assert_eq!(unredact_one_way(&b.text, &b.tokens).unwrap(), input);
     }
 
     #[test]
     fn one_way_repeated_value_shares_token() {
-        let r = redact_one_way_with_salt("a@b.com and again a@b.com", &TEST_SALT);
+        let r = redact_to_mapping_with_salt("a@b.com and again a@b.com", &TEST_SALT);
         let toks = token::parse_tokens(&r.text);
         assert_eq!(toks.len(), 2);
         assert_eq!(toks[0].as_token(), toks[1].as_token());
         assert_eq!(r.tokens.len(), 1, "same value → one entry");
+    }
+    #[test]
+    fn collision_extension_checks_every_candidate_including_full_digest() {
+        let mut assigner = TokenAssigner::default();
+        let digest = "a".repeat(64);
+        let mut assigned = HashSet::new();
+        for i in 0..20 {
+            let original = format!("distinct-{i}");
+            let token = assigner.assign_digest("Person", &original, &digest);
+            assert!(
+                assigned.insert(token.clone()),
+                "collision must never reuse a token"
+            );
+            assert_eq!(assigner.assign_digest("Person", &original, &digest), token);
+            assert_eq!(token::parse_tokens(&token).len(), 1);
+        }
+        assert!(
+            assigned.iter().any(|token| token.len() > 73),
+            "test must reach full-digest collision fallback"
+        );
     }
 }

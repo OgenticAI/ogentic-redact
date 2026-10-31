@@ -183,3 +183,13 @@ class TestAC5LegalFinanceDivergence:
 
         assert legal_covers_case is True
         assert finance_covers_case is False
+
+
+@pytest.mark.parametrize("entity_types", [None, "PERSON", [None], [""], ["not a label"]])
+def test_invalid_entity_configuration_rejected(entity_types) -> None:
+    with pytest.raises(ValueError, match="entity_types"):
+        Profile(entity_types=entity_types)
+
+
+def test_empty_entity_selection_is_explicit_and_valid() -> None:
+    assert Profile(entity_types=[]).entity_types == []

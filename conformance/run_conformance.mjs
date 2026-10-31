@@ -1,105 +1,32 @@
-/**
- * F3 cross-language conformance test — Node.js surface.
- *
- * Loads `conformance/vectors.json` from the repo root and verifies that the
- * napi-rs `redact()` function produces byte-identical output to the expected
- * values.  Any divergence exits non-zero (→ CI red).
- *
- * Run (from repo root, after building the napi crate):
- *   node conformance/run_conformance.mjs
- *
- * The compiled `.node` addon is expected at:
- *   packages/ogentic-redact-node/ogentic_redact_node.linux-x64-gnu.node
- *   (or the platform-appropriate filename)
- */
+/** Cross-language safe one-way conformance, plus explicit store-backed restoration. */
+import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import assert from 'node:assert/strict';
 
-import { createRequire } from 'module';
-import { readFileSync } from 'fs';
-import { resolve, dirname } from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(__dirname, '..');
-
-// ── Load vectors ──────────────────────────────────────────────────────────────
-
-const vectorsPath = resolve(repoRoot, 'conformance', 'vectors.json');
-const { vectors, call_salt_hex } = JSON.parse(readFileSync(vectorsPath, 'utf-8'));
-
-if (!vectors || vectors.length === 0) {
-  console.error('vectors.json must contain at least one vector');
-  process.exit(1);
-}
-if (!call_salt_hex) {
-  console.error('vectors.json must carry a fixed call_salt_hex');
-  process.exit(1);
-}
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const { vectors, call_salt_hex } = JSON.parse(readFileSync(resolve(root, 'conformance/vectors.json'), 'utf8'));
+assert.ok(vectors?.length, 'conformance vectors must not be empty');
+assert.ok(call_salt_hex, 'fixed conformance salt is required');
 const salt = Buffer.from(call_salt_hex, 'hex');
-
-// ── Load the napi-rs binding ──────────────────────────────────────────────────
-
-const require = createRequire(import.meta.url);
-
-// Try to find the compiled .node addon.  napi-rs names the file using the
-// target triple, e.g. `ogentic_redact_node.linux-x64-gnu.node`.
-let binding;
-try {
-  // napi-rs places the build artefact in the package directory after
-  // `cargo build --release -p ogentic-redact-node` + napi-build postprocess.
-  const pkgDir = resolve(repoRoot, 'packages', 'ogentic-redact-node');
-  const { globSync } = await import('glob').catch(() => null) ?? {};
-  let addonPath;
-  if (globSync) {
-    const matches = globSync(`${pkgDir}/*.node`);
-    addonPath = matches[0];
-  } else {
-    // Fallback: conventional filename on linux-x64
-    addonPath = resolve(pkgDir, 'ogentic_redact_node.linux-x64-gnu.node');
-  }
-  if (!addonPath) throw new Error('no .node file found');
-  binding = require(addonPath);
-} catch (err) {
-  console.error(`[SKIP] Cannot load ogentic-redact-node binding: ${err.message}`);
-  console.error('       Build it first: cargo build --release -p ogentic-redact-node');
-  process.exit(0); // skip, not fail, when the addon is not yet built
+const names = {
+  'darwin-arm64': 'darwin-arm64',
+  'linux-x64': 'linux-x64-gnu',
+  'win32-x64': 'win32-x64-msvc',
+};
+const platform = names[`${process.platform}-${process.arch}`];
+assert.ok(platform, `unsupported test platform: ${process.platform}-${process.arch}`);
+const addon = process.env.OGENTIC_REDACT_BINDING || resolve(root, `packages/ogentic-redact-node/ogentic-redact.${platform}.node`);
+// A missing or incompatible binding is a test failure, never a successful skip.
+const binding = createRequire(import.meta.url)(addon);
+for (const vector of vectors) {
+  const result = binding.redactWithSalt(vector.input, salt);
+  assert.equal(result.text, vector.expected_text, `${vector.id}: safe text differs`);
+  assert.deepEqual(Object.keys(result).sort(), ['redactionCount', 'text']);
+  const redactor = new binding.ReversibleRedactor();
+  const reversible = redactor.redact(vector.input);
+  assert.deepEqual(Object.keys(reversible).sort(), ['mappingId', 'text']);
+  assert.equal(redactor.unredact(reversible.text, reversible.mappingId, true), vector.input, `${vector.id}: round trip differs`);
 }
-
-const { redactWithSalt, unredact } = binding;
-
-// ── Run vectors ───────────────────────────────────────────────────────────────
-
-let passed = 0;
-let failed = 0;
-
-for (const v of vectors) {
-  const result = redactWithSalt(v.input, salt);
-
-  const textOk = result.text === v.expected_text;
-  const tokensOk = JSON.stringify(sortedObj(result.tokens)) === JSON.stringify(sortedObj(v.expected_tokens));
-  const restored = unredact(result.text, result.tokens);
-  const roundTripOk = restored === v.input;
-
-  if (textOk && tokensOk && roundTripOk) {
-    console.log(`  ✓  ${v.id}`);
-    passed++;
-  } else {
-    console.error(`  ✗  ${v.id}`);
-    if (!textOk) {
-      console.error(`       text\n         got:      ${JSON.stringify(result.text)}\n         expected: ${JSON.stringify(v.expected_text)}`);
-    }
-    if (!tokensOk) {
-      console.error(`       tokens\n         got:      ${JSON.stringify(result.tokens)}\n         expected: ${JSON.stringify(v.expected_tokens)}`);
-    }
-    if (!roundTripOk) {
-      console.error(`       round-trip\n         got:      ${JSON.stringify(restored)}\n         expected: ${JSON.stringify(v.input)}`);
-    }
-    failed++;
-  }
-}
-
-console.log(`\n${passed} passed, ${failed} failed (Node.js surface, ${vectors.length} vectors)`);
-process.exit(failed > 0 ? 1 : 0);
-
-function sortedObj(obj) {
-  return Object.fromEntries(Object.entries(obj).sort(([a], [b]) => a.localeCompare(b)));
-}
+console.log(`${vectors.length} vectors passed: safe default and explicit reversible mode`);

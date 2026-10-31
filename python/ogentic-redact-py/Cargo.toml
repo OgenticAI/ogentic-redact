@@ -13,6 +13,9 @@ authors.workspace = true
 name = "ogentic_redact"
 crate-type = ["cdylib"]
 path = "src/lib.rs"
+# This private extension has Python API stubs, not a public Rust API. Its crate
+# name also collides with the CLI's rustdoc output directory.
+doc = false
 
 [dependencies]
 ogentic-redact-core = { workspace = true }

@@ -1,0 +1,168 @@
+{
+  "call_salt_hex": "000102030405060708090a0b0c0d0e0f",
+  "description": "F4 golden vectors — cross-language conformance for the ADR-0003 token grammar `[Label_<salted-hex>]`. Every surface (Rust, Python, Node.js, Swift), given `input` and the fixed `call_salt_hex`, must produce byte-identical `expected_text`; explicit reversible test helpers verify `expected_tokens` and must round-trip (unredact restores `input`).",
+  "vectors": [
+    {
+      "description": "Single email in a sentence",
+      "expected_text": "Contact [Email_69cdedcc] for details.",
+      "expected_tokens": {
+        "[Email_69cdedcc]": "alice@example.com"
+      },
+      "id": "email-simple-001",
+      "input": "Contact alice@example.com for details."
+    },
+    {
+      "description": "Email with subdomain in domain part",
+      "expected_text": "Forward to [Email_9c6cbeed] now.",
+      "expected_tokens": {
+        "[Email_9c6cbeed]": "bob.smith@mail.corp.io"
+      },
+      "id": "email-subdomain-002",
+      "input": "Forward to bob.smith@mail.corp.io now."
+    },
+    {
+      "description": "Email with + tag in local part",
+      "expected_text": "Reply to [Email_6621ed11].",
+      "expected_tokens": {
+        "[Email_6621ed11]": "carol+tag@example.org"
+      },
+      "id": "email-plus-tag-003",
+      "input": "Reply to carol+tag@example.org."
+    },
+    {
+      "description": "US phone in NXX-NXX-XXXX dash format",
+      "expected_text": "Call [Phone_97e2af1d] for support.",
+      "expected_tokens": {
+        "[Phone_97e2af1d]": "555-867-5309"
+      },
+      "id": "phone-dash-004",
+      "input": "Call 555-867-5309 for support."
+    },
+    {
+      "description": "US phone in (NXX) NXX-XXXX parenthesis format",
+      "expected_text": "Office: [Phone_fc936eac].",
+      "expected_tokens": {
+        "[Phone_fc936eac]": "(415) 555-0100"
+      },
+      "id": "phone-parens-005",
+      "input": "Office: (415) 555-0100."
+    },
+    {
+      "description": "US phone in +1-NXX-NXX-XXXX E.164 format",
+      "expected_text": "Text [Phone_07623222] anytime.",
+      "expected_tokens": {
+        "[Phone_07623222]": "+1-800-555-0199"
+      },
+      "id": "phone-e164-006",
+      "input": "Text +1-800-555-0199 anytime."
+    },
+    {
+      "description": "US Social Security Number DDD-DD-DDDD",
+      "expected_text": "Patient SSN is [Ssn_f6f2a8dc].",
+      "expected_tokens": {
+        "[Ssn_f6f2a8dc]": "123-45-6789"
+      },
+      "id": "ssn-basic-007",
+      "input": "Patient SSN is 123-45-6789."
+    },
+    {
+      "description": "Plain text with no PII — must pass through unchanged",
+      "expected_text": "The quick brown fox jumps over the lazy dog.",
+      "expected_tokens": {},
+      "id": "clean-passthrough-008",
+      "input": "The quick brown fox jumps over the lazy dog."
+    },
+    {
+      "description": "Empty input — must return empty output",
+      "expected_text": "",
+      "expected_tokens": {},
+      "id": "empty-string-009",
+      "input": ""
+    },
+    {
+      "description": "Email at sentence end — trailing period must NOT be consumed",
+      "expected_text": "Send mail to [Email_83dcd90e].",
+      "expected_tokens": {
+        "[Email_83dcd90e]": "support@example.com"
+      },
+      "id": "email-at-sentence-end-010",
+      "input": "Send mail to support@example.com."
+    },
+    {
+      "description": "Both email and phone in the same string",
+      "expected_text": "Email [Email_69cdedcc] or call [Phone_97e2af1d].",
+      "expected_tokens": {
+        "[Email_69cdedcc]": "alice@example.com",
+        "[Phone_97e2af1d]": "555-867-5309"
+      },
+      "id": "multi-entity-email-phone-011",
+      "input": "Email alice@example.com or call 555-867-5309."
+    },
+    {
+      "description": "Two emails — numbered EMAIL_1 and EMAIL_2 in scan order",
+      "expected_text": "From [Email_044d5593] to [Email_091684c7] for the meeting.",
+      "expected_tokens": {
+        "[Email_044d5593]": "alice@a.com",
+        "[Email_091684c7]": "bob@b.com"
+      },
+      "id": "multi-email-012",
+      "input": "From alice@a.com to bob@b.com for the meeting."
+    },
+    {
+      "description": "ASCII email adjacent to non-ASCII surrounding text",
+      "expected_text": "Héllo, contact [Email_1894f26f] today.",
+      "expected_tokens": {
+        "[Email_1894f26f]": "info@example.com"
+      },
+      "id": "unicode-adjacent-013",
+      "input": "Héllo, contact info@example.com today."
+    },
+    {
+      "description": "Two sentences — streaming splits on period after each sentence",
+      "expected_text": "Hello [Email_69cdedcc]. Call [Phone_97e2af1d] tomorrow.",
+      "expected_tokens": {
+        "[Email_69cdedcc]": "alice@example.com",
+        "[Phone_97e2af1d]": "555-867-5309"
+      },
+      "id": "streaming-multi-sentence-014",
+      "input": "Hello alice@example.com. Call 555-867-5309 tomorrow."
+    },
+    {
+      "description": "SSN-like pattern preceded by digit must NOT be matched",
+      "expected_text": "Code 1123-45-6789 is not an SSN.",
+      "expected_tokens": {},
+      "id": "ssn-not-adjacent-digit-015",
+      "input": "Code 1123-45-6789 is not an SSN."
+    },
+    {
+      "description": "Distinct original case variants retain separate tokens and exact restoration",
+      "expected_text": "[Email_6786c6cf] [Email_69cdedcc] [Email_f39a6c2e].",
+      "expected_tokens": {
+        "[Email_6786c6cf]": "Alice@example.com",
+        "[Email_69cdedcc]": "alice@example.com",
+        "[Email_f39a6c2e]": "ALICE@example.com"
+      },
+      "id": "mixed-case-originals-016",
+      "input": "Alice@example.com alice@example.com ALICE@example.com."
+    },
+    {
+      "description": "A source token matching a candidate is reserved and remains literal after restoration",
+      "expected_text": "[Email_69cdedcc4bbe] example:[Email_69cdedcc] [Email_69cdedcc4bbe]",
+      "expected_tokens": {
+        "[Email_69cdedcc4bbe]": "alice@example.com"
+      },
+      "id": "literal-token-reservation-017",
+      "input": "alice@example.com example:[Email_69cdedcc] alice@example.com"
+    },
+    {
+      "description": "Repeated exact originals share one token and restore every occurrence",
+      "expected_text": "[Email_69cdedcc] and [Email_69cdedcc]",
+      "expected_tokens": {
+        "[Email_69cdedcc]": "alice@example.com"
+      },
+      "id": "repeated-value-018",
+      "input": "alice@example.com and alice@example.com"
+    }
+  ],
+  "version": "f4"
+}

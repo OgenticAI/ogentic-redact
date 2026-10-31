@@ -1,7 +1,7 @@
 """Acceptance tests for audit-mandatory detection events (OGE-1247 / REDACT-INT-AUDIT).
 
 AC1: Every redact() call emits an audit event to the emitter for each detected entity type.
-AC2: Every redact_stream() call emits audit events after completing all chunks.
+AC2: Every redact_stream() call audits the finalized record before output delivery.
 AC3: Events carry: entity_type, mode, profile, count, and mapping_id (if reversible).
 AC4: Raw sensitive values are never included in audit events.
 AC5: If audit emission fails, redaction raises AuditError (fail-closed).
@@ -385,3 +385,28 @@ class TestBackwardsCompatibility:
         results = list(redact_stream(chunks, profile))
 
         assert len(results) == 1
+
+
+def test_stream_audit_failure_prevents_first_yield() -> None:
+    stream = redact_stream(
+        ['Contact alice@', 'example.com now.'],
+        Profile(entity_types=['EMAIL_ADDRESS']),
+        audit_emitter=FailingAuditEmitter(),
+    )
+    with pytest.raises(AuditError, match='audit event recording failed'):
+        next(stream)
+
+
+def test_cross_chunk_entity_is_counted_once_before_delivery() -> None:
+    emitter = MockAuditEmitter()
+    stream = redact_stream(
+        ['Contact alice@', 'example.', 'com now.'],
+        Profile(entity_types=['EMAIL_ADDRESS']),
+        audit_emitter=emitter,
+    )
+    first, _ = next(stream)
+    assert first == 'Contact <<EMAIL_ADDRESS_1>>'
+    assert len(emitter.events) == 1
+    assert emitter.events[0].count == 1
+    assert emitter.events[0].profile == 'local-stream'
+    assert ''.join([first, *(chunk for chunk, _ in stream)]) == 'Contact <<EMAIL_ADDRESS_1>> now.'
